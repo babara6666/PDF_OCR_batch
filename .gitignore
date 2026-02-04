@@ -177,3 +177,13 @@ cython_debug/
 .idea/
 
 .vscode/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env
+frontend/.env.local
+
+# Backend uploads
+backend/uploads/
