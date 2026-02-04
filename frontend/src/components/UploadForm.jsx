@@ -32,11 +32,34 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
     }
   };
 
+  // Allowed file types
+  const allowedTypes = [
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/tiff"
+  ];
+
+  const isAllowedFile = (file) => {
+    return allowedTypes.includes(file.type) || 
+           /\.(pdf|jpe?g|png|gif|webp|bmp|tiff?)$/i.test(file.name);
+  };
+
+  const getFileType = (file) => {
+    if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+      return "pdf";
+    }
+    return "image";
+  };
+
   const handleFileChange = (file) => {
-    if (file && file.type === "application/pdf") {
+    if (file && isAllowedFile(file)) {
       onFileSelect(file);
     } else {
-      alert("Please select a PDF file");
+      alert("Please select a PDF or image file (JPG, PNG, GIF, WEBP, BMP, TIFF)");
     }
   };
 
@@ -57,9 +80,9 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
     <div className="w-full max-w-[640px] flex flex-col gap-8">
       {/* Page Heading */}
       <div className="flex flex-col gap-3 text-center sm:text-left">
-        <h1 className="text-4xl font-black leading-tight tracking-[-0.033em]">Upload your PDF</h1>
+        <h1 className="text-4xl font-black leading-tight tracking-[-0.033em]">Upload your file</h1>
         <p className="text-slate-500 dark:text-[#92adc9] text-base font-normal leading-normal">
-          We will convert your document into a clean Markdown file.
+          We will convert your PDF or image into a clean Markdown file.
         </p>
       </div>
 
@@ -86,7 +109,7 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
             <p className="text-lg font-bold leading-tight tracking-[-0.015em]">
               Drag & drop your file here
             </p>
-            <p className="text-sm text-slate-500 dark:text-[#92adc9]">Supports PDF up to 50MB</p>
+            <p className="text-sm text-slate-500 dark:text-[#92adc9]">Supports PDF & Images (JPG, PNG, GIF, WEBP) up to 50MB</p>
           </div>
           <div className="mt-4">
             <button className="pointer-events-none flex items-center justify-center rounded-lg h-10 px-6 bg-slate-900 dark:bg-[#233648] text-white text-sm font-bold shadow-sm">
@@ -96,7 +119,7 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
         </div>
         <input
           ref={fileInputRef}
-          accept=".pdf"
+          accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.bmp,.tiff,.tif"
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
           type="file"
           onChange={handleInputChange}
@@ -114,8 +137,14 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
           </div>
           <div className="relative flex items-center gap-4 rounded-lg bg-white dark:bg-[#192633] p-4 shadow-sm border border-slate-100 dark:border-transparent">
             {/* Icon Preview */}
-            <div className="flex-shrink-0 size-12 rounded-lg bg-red-50 dark:bg-red-500/10 flex items-center justify-center text-red-500">
-              <span className="material-symbols-outlined text-2xl">picture_as_pdf</span>
+            <div className={`flex-shrink-0 size-12 rounded-lg flex items-center justify-center ${
+              getFileType(selectedFile) === "pdf" 
+                ? "bg-red-50 dark:bg-red-500/10 text-red-500"
+                : "bg-blue-50 dark:bg-blue-500/10 text-blue-500"
+            }`}>
+              <span className="material-symbols-outlined text-2xl">
+                {getFileType(selectedFile) === "pdf" ? "picture_as_pdf" : "image"}
+              </span>
             </div>
             {/* File Info */}
             <div className="flex flex-col flex-1 min-w-0">

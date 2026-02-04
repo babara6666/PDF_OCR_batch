@@ -1,14 +1,14 @@
-# PDF OCR Service
+# PDF/Image OCR Service
 
-基於 [datalab-to/marker](https://github.com/datalab-to/marker) 的 PDF 轉 Markdown 服務，提供 Web 前端介面上傳 PDF 並輸出 Markdown 檔案。
+基於 [datalab-to/marker](https://github.com/datalab-to/marker) 的 PDF/圖片 轉 Markdown 服務，提供 Web 前端介面上傳 PDF 或圖片並輸出 Markdown 檔案。
 
 ## 功能特色
 
-- 🚀 **高效轉換**: 使用 Marker 深度學習模型將 PDF 轉換為 Markdown
+- 🚀 **高效轉換**: 使用 Marker 深度學習模型將 PDF/圖片 轉換為 Markdown
+- 🖼️ **圖片辨識**: 支援 JPG, PNG, GIF, WEBP, BMP, TIFF 格式圖片
 - 🎯 **多語言支援**: 支援中英日韓等多國語言 OCR
 - 📊 **表格識別**: 自動識別並格式化 PDF 中的表格
 - 🔢 **數學公式**: 支援 LaTeX 數學公式提取
-- 🖼️ **圖片處理**: 自動提取並保存圖片
 - ⚡ **GPU 加速**: 支援 CUDA GPU 加速處理
 
 ## 系統需求

@@ -1,5 +1,5 @@
 """
-FastAPI Backend for PDF OCR using Marker
+FastAPI Backend for PDF/Image OCR using Marker
 Provides CAD_OCR-compatible API interface
 """
 
@@ -19,13 +19,21 @@ from marker.models import create_model_dict
 from marker.output import text_from_rendered
 
 # Configuration
-API_TITLE = "PDF OCR Service (Marker)"
-API_VERSION = "1.0.0"
-API_DESCRIPTION = "PDF to Markdown conversion using Marker"
+API_TITLE = "PDF/Image OCR Service (Marker)"
+API_VERSION = "1.1.0"
+API_DESCRIPTION = "PDF and Image to Markdown conversion using Marker"
 CORS_ORIGINS = ["http://localhost:5173", "http://localhost:5174", "http://localhost:3000", "http://127.0.0.1:5173", "http://127.0.0.1:5174"]
 UPLOAD_DIR = Path(__file__).parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+
+# Supported file types
+ALLOWED_EXTENSIONS = {
+    # PDF
+    ".pdf",
+    # Images
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"
+}
 
 # Global state
 app_data = {}
@@ -37,7 +45,26 @@ class OCRResponse(BaseModel):
     markdown_content: str = ""
     file_size: int = 0
     processing_time: float = 0.0
+    file_type: str = ""
     error: str = ""
+
+
+def get_file_extension(filename: str) -> str:
+    """Get lowercase file extension"""
+    return Path(filename).suffix.lower()
+
+
+def is_allowed_file(filename: str) -> bool:
+    """Check if file extension is allowed"""
+    return get_file_extension(filename) in ALLOWED_EXTENSIONS
+
+
+def get_file_type(filename: str) -> str:
+    """Get file type category"""
+    ext = get_file_extension(filename)
+    if ext == ".pdf":
+        return "pdf"
+    return "image"
 
 
 @asynccontextmanager
@@ -105,6 +132,7 @@ async def root():
     return {
         "name": API_TITLE,
         "version": API_VERSION,
+        "supported_formats": list(ALLOWED_EXTENSIONS),
         "endpoints": {
             "upload": "/api/upload",
             "health": "/api/health",
@@ -118,21 +146,28 @@ async def health_check():
         "status": "healthy",
         "model_loaded": "models" in app_data,
         "device": app_data.get("device", "unknown"),
+        "supported_formats": list(ALLOWED_EXTENSIONS),
     }
 
 
 @app.post("/api/upload", response_model=OCRResponse)
-async def upload_and_process_pdf(
-    file: UploadFile = File(..., description="PDF file to process"),
+async def upload_and_process_file(
+    file: UploadFile = File(..., description="PDF or Image file to process"),
 ):
-    """Upload PDF and convert to Markdown using Marker"""
+    """Upload PDF or Image and convert to Markdown using Marker"""
     file_path = None
     start_time = time.time()
     
     try:
         # Validate file type
-        if not file.filename.lower().endswith(".pdf"):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        if not is_allowed_file(file.filename):
+            allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Unsupported file type. Allowed: {allowed}"
+            )
+        
+        file_type = get_file_type(file.filename)
         
         # Read file content
         content = await file.read()
@@ -147,7 +182,7 @@ async def upload_and_process_pdf(
             f.write(content)
         
         print(f"\n{'=' * 60}")
-        print(f"Processing: {file.filename} ({file_size / 1024:.1f} KB)")
+        print(f"Processing [{file_type.upper()}]: {file.filename} ({file_size / 1024:.1f} KB)")
         print(f"{'=' * 60}")
         
         # Ensure models are loaded
@@ -156,6 +191,7 @@ async def upload_and_process_pdf(
             app_data["models"] = create_model_dict()
         
         # Create converter and process
+        # PdfConverter auto-detects file type and uses appropriate provider
         converter = PdfConverter(artifact_dict=app_data["models"])
         rendered = converter(str(file_path))
         markdown_text, _, _ = text_from_rendered(rendered)
@@ -170,6 +206,7 @@ async def upload_and_process_pdf(
             markdown_content=markdown_text,
             file_size=file_size,
             processing_time=processing_time,
+            file_type=file_type,
         )
         
     except HTTPException:
@@ -189,3 +226,4 @@ async def upload_and_process_pdf(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+
