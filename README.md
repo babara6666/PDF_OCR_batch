@@ -1,15 +1,16 @@
-# PDF/Image OCR Service
+# Batch PDF/Image OCR Service
 
-基於 [datalab-to/marker](https://github.com/datalab-to/marker) 的 PDF/圖片 轉 Markdown 服務，提供 Web 前端介面上傳 PDF 或圖片並輸出 Markdown 檔案。
+基於 [datalab-to/marker](https://github.com/datalab-to/marker) 的批次 PDF/圖片轉 Markdown 服務，提供 Web 前端介面支援多檔案批次上傳、即時狀態追蹤，並輸出對應的 Markdown 檔案。
 
 ## 功能特色
 
-- 🚀 **高效轉換**: 使用 Marker 深度學習模型將 PDF/圖片 轉換為 Markdown
-- 🖼️ **圖片辨識**: 支援 JPG, PNG, GIF, WEBP, BMP, TIFF 格式圖片
+- 🚀 **高效批次轉換**: 支援多份檔案同時上傳與背景佇列處理
+- 🖼️ **多種圖片支援**: 支援 PDF 與多種圖片格式 (JPG, PNG, GIF, WEBP, BMP, TIFF)
 - 🎯 **多語言支援**: 支援中英日韓等多國語言 OCR
 - 📊 **表格識別**: 自動識別並格式化 PDF 中的表格
 - 🔢 **數學公式**: 支援 LaTeX 數學公式提取
 - ⚡ **GPU 加速**: 支援 CUDA GPU 加速處理
+- 📦 **打包下載**: 批次轉換完成後自動整理與下載結果
 
 ## 系統需求
 
@@ -95,7 +96,10 @@ npm run dev
 |------|------|------|
 | `/` | GET | API 資訊 |
 | `/api/health` | GET | 健康檢查 |
-| `/api/upload` | POST | 上傳 PDF 並轉換 |
+| `/api/upload` | POST | 單一檔案上傳並轉換 (向下相容) |
+| `/api/batch_upload` | POST | 批次上傳檔案並開始處理任務 |
+| `/api/batch_status/{batch_id}` | GET | 查詢指定批次任務的處理狀態與進度 |
+| `/api/batch_results/{batch_id}` | GET | 下載該批次任務所有完成的 Markdown 壓縮檔 |
 
 ### 上傳範例
 

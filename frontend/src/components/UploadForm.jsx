@@ -1,6 +1,13 @@
 import { useState, useRef } from "react";
 
-const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProcessing }) => {
+const UploadForm = ({
+  onFilesSelect,
+  selectedFiles,
+  onRemoveFile,
+  onUpload,
+  isProcessing,
+  mode = "ocr",   // "ocr" | "notes"
+}) => {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -26,9 +33,9 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
     e.stopPropagation();
     setIsDragging(false);
 
-    const files = e.dataTransfer.files;
-    if (files && files[0]) {
-      handleFileChange(files[0]);
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    if (droppedFiles.length > 0) {
+      handleFilesChange(droppedFiles);
     }
   };
 
@@ -40,34 +47,46 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
     "image/gif",
     "image/webp",
     "image/bmp",
-    "image/tiff"
+    "image/tiff",
   ];
 
   const isAllowedFile = (file) => {
-    return allowedTypes.includes(file.type) || 
-           /\.(pdf|jpe?g|png|gif|webp|bmp|tiff?)$/i.test(file.name);
+    return (
+      allowedTypes.includes(file.type) ||
+      /\.(pdf|jpe?g|png|gif|webp|bmp|tiff?)$/i.test(file.name)
+    );
   };
 
   const getFileType = (file) => {
-    if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+    if (
+      file.type === "application/pdf" ||
+      file.name.toLowerCase().endsWith(".pdf")
+    ) {
       return "pdf";
     }
     return "image";
   };
 
-  const handleFileChange = (file) => {
-    if (file && isAllowedFile(file)) {
-      onFileSelect(file);
-    } else {
-      alert("Please select a PDF or image file (JPG, PNG, GIF, WEBP, BMP, TIFF)");
+  const handleFilesChange = (newFiles) => {
+    const validFiles = newFiles.filter((f) => isAllowedFile(f));
+    const invalidCount = newFiles.length - validFiles.length;
+    if (invalidCount > 0) {
+      alert(
+        `${invalidCount} file(s) skipped — only PDF and image files (JPG, PNG, GIF, WEBP, BMP, TIFF) are allowed.`,
+      );
+    }
+    if (validFiles.length > 0) {
+      onFilesSelect(validFiles);
     }
   };
 
   const handleInputChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      handleFileChange(file);
+    const files = Array.from(e.target.files);
+    if (files.length > 0) {
+      handleFilesChange(files);
     }
+    // Reset so same files can be re-selected
+    e.target.value = "";
   };
 
   const formatFileSize = (bytes) => {
@@ -76,13 +95,19 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
     return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   };
 
+  const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
+
   return (
     <div className="w-full max-w-[640px] flex flex-col gap-8">
       {/* Page Heading */}
       <div className="flex flex-col gap-3 text-center sm:text-left">
-        <h1 className="text-4xl font-black leading-tight tracking-[-0.033em]">Upload your file</h1>
+        <h1 className="text-4xl font-black leading-tight tracking-[-0.033em]">
+          {mode === "notes" ? "Upload engineering drawings" : "Upload your files"}
+        </h1>
         <p className="text-slate-500 dark:text-[#92adc9] text-base font-normal leading-normal">
-          We will convert your PDF or image into a clean Markdown file.
+          {mode === "notes"
+            ? "Upload engineering drawing PDFs to automatically detect and extract the 'Notes:' section. Batch processing supported."
+            : "We will convert your PDFs and images into clean Markdown files. You can upload multiple files at once."}
         </p>
       </div>
 
@@ -107,9 +132,11 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
           </div>
           <div className="flex flex-col gap-1">
             <p className="text-lg font-bold leading-tight tracking-[-0.015em]">
-              Drag & drop your file here
+              Drag & drop your files here
             </p>
-            <p className="text-sm text-slate-500 dark:text-[#92adc9]">Supports PDF & Images (JPG, PNG, GIF, WEBP) up to 50MB</p>
+            <p className="text-sm text-slate-500 dark:text-[#92adc9]">
+              Supports PDF & Images (JPG, PNG, GIF, WEBP) up to 50MB each
+            </p>
           </div>
           <div className="mt-4">
             <button className="pointer-events-none flex items-center justify-center rounded-lg h-10 px-6 bg-slate-900 dark:bg-[#233648] text-white text-sm font-bold shadow-sm">
@@ -122,60 +149,89 @@ const UploadForm = ({ onFileSelect, selectedFile, onRemoveFile, onUpload, isProc
           accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.bmp,.tiff,.tif"
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
           type="file"
+          multiple
           onChange={handleInputChange}
         />
       </div>
 
-      {/* Selected File Preview */}
-      {selectedFile && (
+      {/* Selected Files Preview */}
+      {selectedFiles.length > 0 && (
         <div className="flex flex-col gap-4 animate-fade-in">
           <div className="flex items-center justify-between">
-            <h3 className="text-base font-bold">Selected File</h3>
+            <h3 className="text-base font-bold">
+              Selected Files
+              <span className="ml-2 text-sm font-medium text-slate-500 dark:text-[#92adc9]">
+                ({selectedFiles.length} file{selectedFiles.length > 1 ? "s" : ""}
+                {" · "}
+                {formatFileSize(totalSize)})
+              </span>
+            </h3>
             <span className="text-xs font-medium text-slate-500 dark:text-[#92adc9]">
               Ready to convert
             </span>
           </div>
-          <div className="relative flex items-center gap-4 rounded-lg bg-white dark:bg-[#192633] p-4 shadow-sm border border-slate-100 dark:border-transparent">
-            {/* Icon Preview */}
-            <div className={`flex-shrink-0 size-12 rounded-lg flex items-center justify-center ${
-              getFileType(selectedFile) === "pdf" 
-                ? "bg-red-50 dark:bg-red-500/10 text-red-500"
-                : "bg-blue-50 dark:bg-blue-500/10 text-blue-500"
-            }`}>
-              <span className="material-symbols-outlined text-2xl">
-                {getFileType(selectedFile) === "pdf" ? "picture_as_pdf" : "image"}
-              </span>
-            </div>
-            {/* File Info */}
-            <div className="flex flex-col flex-1 min-w-0">
-              <p className="text-sm font-bold truncate pr-4">{selectedFile.name}</p>
-              <div className="flex items-center gap-2 mt-1">
-                <p className="text-xs text-slate-500 dark:text-[#92adc9]">
-                  {formatFileSize(selectedFile.size)}
-                </p>
+
+          <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto pr-1">
+            {selectedFiles.map((file, index) => (
+              <div
+                key={`${file.name}-${index}`}
+                className="relative flex items-center gap-4 rounded-lg bg-white dark:bg-[#192633] p-3 shadow-sm border border-slate-100 dark:border-transparent"
+              >
+                {/* Icon */}
+                <div
+                  className={`flex-shrink-0 size-10 rounded-lg flex items-center justify-center ${
+                    getFileType(file) === "pdf"
+                      ? "bg-red-50 dark:bg-red-500/10 text-red-500"
+                      : "bg-blue-50 dark:bg-blue-500/10 text-blue-500"
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-xl">
+                    {getFileType(file) === "pdf" ? "picture_as_pdf" : "image"}
+                  </span>
+                </div>
+                {/* File Info */}
+                <div className="flex flex-col flex-1 min-w-0">
+                  <p className="text-sm font-bold truncate pr-4">{file.name}</p>
+                  <p className="text-xs text-slate-500 dark:text-[#92adc9]">
+                    {formatFileSize(file.size)}
+                  </p>
+                </div>
+                {/* Remove */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveFile(index);
+                  }}
+                  className="flex items-center justify-center size-8 rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-red-500 transition-colors"
+                >
+                  <span className="material-symbols-outlined text-xl">
+                    close
+                  </span>
+                </button>
               </div>
-            </div>
-            {/* Remove Action */}
-            <button
-              onClick={onRemoveFile}
-              className="flex items-center justify-center size-8 rounded-full hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-red-500 transition-colors"
-            >
-              <span className="material-symbols-outlined text-xl">close</span>
-            </button>
+            ))}
           </div>
         </div>
       )}
 
       {/* Primary Action */}
-      {selectedFile && (
+      {selectedFiles.length > 0 && (
         <div className="pt-4">
           <button
             onClick={onUpload}
             disabled={isProcessing}
             className="w-full flex items-center justify-center rounded-xl h-14 px-8 bg-primary hover:bg-blue-600 disabled:bg-slate-400 text-white text-lg font-bold shadow-lg shadow-blue-500/20 transition-all hover:scale-[1.01] active:scale-[0.99] disabled:cursor-not-allowed disabled:hover:scale-100"
           >
-            <span className="mr-2">{isProcessing ? "Processing..." : "Convert to Markdown"}</span>
-            <span className="material-symbols-outlined text-xl">arrow_forward</span>
+            <span className="mr-2">
+              {isProcessing
+                ? "Processing..."
+                : mode === "notes"
+                ? `Extract Notes from ${selectedFiles.length} file${selectedFiles.length > 1 ? "s" : ""}`
+                : `Convert ${selectedFiles.length} file${selectedFiles.length > 1 ? "s" : ""} to Markdown`}
+            </span>
+            <span className="material-symbols-outlined text-xl">
+              arrow_forward
+            </span>
           </button>
           <p className="mt-4 text-center text-xs text-slate-400 dark:text-[#6a7e91]">
             Files are processed locally and not stored on any server.

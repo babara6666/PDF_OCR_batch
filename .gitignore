@@ -187,3 +187,36 @@ frontend/.env.local
 
 # Backend uploads
 backend/uploads/
+backend/conversion_results/
+backend/temp/
+backend/.env
+
+# Local outputs
+batch_results/
+output/
+downloads/
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.webp
+!data/**/*.pdf
+!data/**/*.jpg
+!data/**/*.png
+
+# System/OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+desktop.ini
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets.json
+keys/
+credentials/
