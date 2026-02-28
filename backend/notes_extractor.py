@@ -47,6 +47,7 @@ Template parameters (fraction of page size)
 import base64
 import io
 import os
+import re
 from pathlib import Path
 from typing import Tuple
 
@@ -204,7 +205,7 @@ def _ocr_image_surya(
     # recognition output follows the visual reading order (Notes: → 1 → 2 → …).
     # Surya's own sort_lines can mis-order lines in complex portrait layouts,
     # so we sort here and pass sort_lines=False to preserve our order.
-    polygons.sort(key=lambda poly: min(p[1] for p in poly))
+    polygons.sort(key=lambda poly: (min(p[1] for p in poly), min(p[0] for p in poly)))
 
     spatial_note = (
         f", {skipped_spatial} dropped (centre_x>{max_col_frac:.0%})"
@@ -249,6 +250,152 @@ def _to_b64(image: Image.Image) -> str:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _clean_notes_text(text: str) -> str:
+    """
+    Re-order OCR lines into Notes-friendly reading order.
+
+    Order target:
+      1) "Notes:" header
+      2) numbered items (1,2,3...) in numeric order
+      3) remaining lines (e.g. Chinese translations)
+
+    Also drops obvious non-notes noise such as Drawing NO. rows
+    and tiny garbled fragments.
+    """
+    if not text:
+        return ""
+
+    raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    # 1) Basic cleanup: remove tiny noise and leaked non-notes headers.
+    cleaned = []
+    for line in raw_lines:
+        line = re.sub(r"\s+", " ", line).strip()
+        if len(line) < 3:
+            continue
+        if re.search(r"Drawing\s*N(?:O|o)\.?", line):
+            continue
+        if re.fullmatch(r"[\W_]+", line):
+            continue
+        cleaned.append(line)
+
+    # 2) De-duplicate near-identical OCR lines.
+    deduped = []
+    seen = set()
+    for line in cleaned:
+        key = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", line).lower()
+        if len(key) < 2:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(line)
+
+    # 3) Classify lines.
+    notes_header = []
+    numbered = {}
+    english_rest = []
+    translation_rest = []
+
+    for line in deduped:
+        if re.search(r"\bNotes\s*:", line, re.IGNORECASE):
+            notes_header.append("Notes:")
+            continue
+
+        # Accept OCR variants: "1.Material", "1) Material", "1 Material"
+        # but reject fractions like "5/16: C10B21".
+        m = re.match(r"^\s*(\d{1,2})(?!\s*/\s*\d)\s*[\.):]?\s*(.+?)\s*$", line)
+        if m:
+            idx = int(m.group(1))
+            body = m.group(2).strip()
+            if body:
+                numbered.setdefault(idx, f"{idx}. {body}")
+            continue
+
+        # Materials continuation lines (e.g. "5/16: C10B21")
+        if re.match(r"^\s*#?\d+\s*/\s*\d+\s*:\s*.+$", line, re.IGNORECASE):
+            if 1 in numbered and re.search(r"material", numbered[1], re.IGNORECASE):
+                numbered[1] = f"{numbered[1]}\n{line}"
+            else:
+                english_rest.append(line)
+            continue
+
+        if re.match(r"^\s*[（(].+[)）]\s*$", line):
+            translation_rest.append(line)
+        else:
+            english_rest.append(line)
+
+    # 4) If OCR dropped a leading number, try to fill missing indices with
+    #    note-like unnumbered English lines.
+    if numbered and english_rest:
+        note_like = []
+        non_note_like = []
+        for line in english_rest:
+            if re.search(
+                r"material|hardness|thread|hydrogen|impact|bending|according|test|head",
+                line,
+                re.IGNORECASE,
+            ):
+                note_like.append(line)
+            else:
+                non_note_like.append(line)
+
+        if note_like:
+            used = set(numbered.keys())
+            max_scan = max(used) + len(note_like) + 3
+            missing = [i for i in range(1, max_scan + 1) if i not in used]
+            for line in note_like:
+                idx = missing.pop(0) if missing else (max(numbered.keys()) + 1)
+                numbered[idx] = f"{idx}. {line}"
+
+        english_rest = non_note_like
+
+    # 5) Attach known Chinese translations to matching English numbered lines.
+    attached = {}
+    unmatched_translation = []
+    map_rules = [
+        (("材質",), ("material",)),
+        (("表面硬度",), ("surface hardness",)),
+        (("心部硬度", "芯部硬度"), ("core hardness",)),
+        (("敲擊", "撞擊", "衝擊", "冲击"), ("impact", "head toughness")),
+        (("彎", "弯"), ("bending",)),
+        (("氫脆", "氢脆"), ("hydrogen", "embrittlement")),
+        (("螺紋", "螺纹"), ("thread",)),
+    ]
+
+    for line in translation_rest:
+        target_idx = None
+        for zh_tokens, en_tokens in map_rules:
+            if not any(token in line for token in zh_tokens):
+                continue
+            for idx, eng_line in numbered.items():
+                low = eng_line.lower()
+                if any(token in low for token in en_tokens):
+                    target_idx = idx
+                    break
+            if target_idx is not None:
+                break
+
+        if target_idx is None:
+            unmatched_translation.append(line)
+        else:
+            attached.setdefault(target_idx, []).append(line)
+
+    # 6) Build final order.
+    ordered = []
+    if notes_header:
+        ordered.append("Notes:")
+
+    for idx in sorted(numbered):
+        ordered.append(numbered[idx])
+        ordered.extend(attached.get(idx, []))
+
+    ordered.extend(english_rest)
+    ordered.extend(unmatched_translation)
+
+    return "\n".join(ordered)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +521,7 @@ def extract_notes_from_pdf(
             "crop_image_b64": crop_b64,
         }
 
+    notes_text = _clean_notes_text(notes_text)
     print(f"[Notes] OCR done — {len(notes_text)} chars")
 
     # ------------------------------------------------------------------
