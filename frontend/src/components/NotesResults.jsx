@@ -1,4 +1,6 @@
 import { useState } from "react";
+import JSZip from "jszip";
+import { saveAs } from "file-saver";
 
 /**
  * Displays the results of a Notes-section extraction batch.
@@ -47,6 +49,30 @@ const NotesResults = ({ results, onNewUpload }) => {
     document.body.removeChild(a);
   };
 
+  const b64ToUint8Array = (b64) => {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  };
+
+  const handleDownloadAll = async () => {
+    const zip = new JSZip();
+
+    succeeded.forEach((r) => {
+      const baseName = r.filename.replace(/\.[^.]+$/, "");
+      zip.file(`${baseName}_notes.txt`, r.notes_text || "");
+      if (r.crop_image_b64) {
+        zip.file(`${baseName}_notes_crop.png`, b64ToUint8Array(r.crop_image_b64));
+      }
+    });
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    saveAs(blob, "notes_results.zip");
+  };
+
   const formatFileSize = (bytes) => {
     if (!bytes) return "—";
     if (bytes < 1024)       return bytes + " B";
@@ -80,6 +106,17 @@ const NotesResults = ({ results, onNewUpload }) => {
             )}
           </p>
         </div>
+        {succeeded.length > 1 && (
+          <button
+            onClick={handleDownloadAll}
+            className="flex items-center justify-center gap-2 rounded-lg h-10 px-5 bg-primary hover:bg-blue-600 text-white text-sm font-bold transition-all shadow-md shadow-primary/20"
+          >
+            <span className="material-symbols-outlined text-[20px]">
+              folder_zip
+            </span>
+            <span>Download All (.zip)</span>
+          </button>
+        )}
       </div>
 
       {/* ── Results list ── */}
@@ -279,12 +316,30 @@ const NotesResults = ({ results, onNewUpload }) => {
             Extract Notes from another batch or switch to Full OCR mode.
           </p>
         </div>
-        <button
-          onClick={onNewUpload}
-          className="flex items-center justify-center rounded-lg h-12 px-6 bg-slate-200 dark:bg-[#233648] hover:bg-slate-300 dark:hover:bg-[#2f455a] text-slate-900 dark:text-white text-base font-bold transition-all"
-        >
-          New Batch
-        </button>
+        <div className="flex gap-3 w-full sm:w-auto">
+          <button
+            onClick={onNewUpload}
+            className="flex-1 sm:flex-none flex items-center justify-center rounded-lg h-12 px-6 bg-slate-200 dark:bg-[#233648] hover:bg-slate-300 dark:hover:bg-[#2f455a] text-slate-900 dark:text-white text-base font-bold transition-all"
+          >
+            New Batch
+          </button>
+          {succeeded.length > 1 && (
+            <button
+              onClick={handleDownloadAll}
+              className="flex-1 sm:flex-none flex min-w-[190px] cursor-pointer items-center justify-center rounded-lg h-12 px-6 bg-primary hover:bg-blue-600 active:bg-blue-700 text-white text-base font-bold leading-normal tracking-wide transition-all shadow-lg shadow-primary/25"
+            >
+              Download All (.zip)
+            </button>
+          )}
+          {succeeded.length === 1 && (
+            <button
+              onClick={() => handleDownloadText(succeeded[0])}
+              className="flex-1 sm:flex-none flex min-w-[190px] cursor-pointer items-center justify-center rounded-lg h-12 px-6 bg-primary hover:bg-blue-600 active:bg-blue-700 text-white text-base font-bold leading-normal tracking-wide transition-all shadow-lg shadow-primary/25"
+            >
+              Download .txt
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
