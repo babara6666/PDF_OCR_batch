@@ -35,10 +35,10 @@ Template parameters (fraction of page size)
   ┌───────────────────────────────────────────────────┐
   │ Company header  │  Drawing NO. row               │ 0 – 7 %
   ├─────────────────────────────────────────────────  │
-  │ X_MIN(~15%)   X_MAX(~67%)  │ spec table cols     │
+  │ X_MIN(~12%)   X_MAX(~65%)  │ spec table cols     │
   │  Notes:    ← Y_MIN(~6%)    │                     │
   │  1. Materials              │                     │
-  │  …          ← Y_MAX(~37%) │                     │
+  │  …          ← Y_MAX(~40%) │                     │
   │  ─────────────────────────────────────────────   │
   │  Technical drawing (screw diagram)  — excluded   │
   └───────────────────────────────────────────────────┘
@@ -68,10 +68,10 @@ LAND_Y_MAX = 0.53  # Notes text bottom — lowered from 0.50 for drawings with m
 # Surya OCR (detection+recognition) is used directly, so mechanical drawings
 # inside the crop (e.g. screw diagrams) will produce no text detections and
 # are harmless — allowing wider Y bounds without OCR contamination.
-PORT_X_MIN = 0.12  # Notes left  edge
-PORT_X_MAX = 0.55  # Notes right edge — wide enough for long notes lines
+PORT_X_MIN = 0.08  # Notes left  edge — reduced from 0.12 so item numbers (1./2.) near the left edge are not cut
+PORT_X_MAX = 0.73  # Notes right edge — extended from 0.65; some drawings have Notes boxes reaching ~67-68 %
 PORT_Y_MIN = 0.05  # Notes top  — 0.02 was too high (captured Drawing NO. header row)
-PORT_Y_MAX = 0.44  # Notes text bottom
+PORT_Y_MAX = 0.40  # Notes text bottom — reduced from 0.44 to avoid spec-table rows leaking in
 
 # Render DPI for the crop image sent to OCR.
 RENDER_DPI = 150
@@ -269,7 +269,37 @@ def _clean_notes_text(text: str) -> str:
 
     raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    # 1) Basic cleanup: remove tiny noise and leaked non-notes headers.
+    # Spec-table column headers and pure-numeric rows that can leak into the
+    # Notes crop when the spec table appears just below the Notes box.
+    _SPEC_NOISE_EXACT = re.compile(
+        r"^(?:"
+        r"Case\s*Depth"
+        r"|渗碳層|滲碳層"
+        r"|Torsional"
+        r"|扭力值?\s*Min"
+        r"|扭力強度"
+        r"|Drive\s+in\s+Torsional"
+        r"|旋入扭力.*"
+        r"|kgf[\s·]*cm"
+        r"|lb-in\.?"
+        r"|Nm"
+        r"|Eht\s*\d+.*"          # e.g. "Eht 400 HV0.3"
+        r"|Min|Max"              # standalone column sub-headers
+        r"|Ref\.$"               # lone "Ref." column label (but NOT "Ref. DIN…" which has more text)
+        r"|RF-[A-Z0-9\-]+"       # drawing number strings leaked from header (e.g. RF-A1-0378-1)
+        r"|Torsion\s*Stre.*"     # "Torsion Strength" column header variants
+        r"|渗碳層\s*mm|滲碳層\s*mm"  # "Case Depth mm" Chinese label
+        r")$",
+        re.IGNORECASE,
+    )
+    _PURE_NUMERIC = re.compile(r"^[\d.,\s~±\-/×≥≤<>°%]+$")
+
+    def _is_spec_noise(line: str) -> bool:
+        """Return True if *line* looks like a spec-table header/value, not a Note."""
+        return bool(_PURE_NUMERIC.fullmatch(line) or _SPEC_NOISE_EXACT.fullmatch(line))
+
+    # 1) Basic cleanup: remove tiny noise, leaked non-notes headers, and
+    #    spec-table content that leaked in from below the Notes box.
     cleaned = []
     for line in raw_lines:
         line = re.sub(r"\s+", " ", line).strip()
@@ -278,6 +308,8 @@ def _clean_notes_text(text: str) -> str:
         if re.search(r"Drawing\s*N(?:O|o)\.?", line):
             continue
         if re.fullmatch(r"[\W_]+", line):
+            continue
+        if _is_spec_noise(line):
             continue
         cleaned.append(line)
 
@@ -504,9 +536,10 @@ def extract_notes_from_pdf(
     # next to (or just inside) the Notes box border.  Landscape pages
     # don't need this because the spec table is below, not to the right.
     # ------------------------------------------------------------------
-    # Portrait: filter out bboxes in the rightmost 20% of the crop (table cols).
-    # 0.80 (vs the previous 0.70) gives more room for the last Notes items
-    # (e.g. "Ref. to IFI…") which sit near the right side of the Notes box.
+    # Portrait: filter out bboxes in the rightmost 20 % of the crop (spec table cols).
+    # With PORT_X_MIN=0.08 / PORT_X_MAX=0.73, the crop is 65 % of page width.
+    # Notes lines span the full Notes box (centre ≈ 40-50 % of crop) → pass.
+    # Spec-table column labels (narrow, centre ≈ 83 %+ of crop) → dropped.
     max_col_frac = 0.80 if orientation == "portrait" else None
 
     try:

@@ -25,6 +25,7 @@ from marker.models import create_model_dict
 from marker.output import text_from_rendered
 
 # Notes extraction — imported lazily inside each endpoint
+from quality_checker import check_document_quality
 
 # Configuration
 API_TITLE = "PDF/Image OCR Service (Marker)"
@@ -76,6 +77,9 @@ class OCRResponse(BaseModel):
     processing_time: float = 0.0
     file_type: str = ""
     error: str = ""
+    blur_score: float = 0.0
+    brightness: float = 0.0
+    contrast: float = 0.0
 
 
 def get_file_extension(filename: str) -> str:
@@ -218,6 +222,13 @@ async def upload_and_process_file(
         )
         print(f"{'=' * 60}")
 
+        # Pre-OCR quality check
+        quality = check_document_quality(str(file_path), file_type)
+        print(f"  Quality — blur={quality['blur_score']} brightness={quality['brightness']} contrast={quality['contrast']}")
+        if not quality["passed"]:
+            print(f"  ✗ {quality['reason']}")
+            raise HTTPException(status_code=422, detail=quality["reason"])
+
         # Ensure models are loaded
         if "models" not in app_data:
             print("Loading models...")
@@ -240,6 +251,9 @@ async def upload_and_process_file(
             file_size=file_size,
             processing_time=processing_time,
             file_type=file_type,
+            blur_score=quality["blur_score"],
+            brightness=quality["brightness"],
+            contrast=quality["contrast"],
         )
 
     except HTTPException:
@@ -256,11 +270,91 @@ async def upload_and_process_file(
                 pass
 
 
+@app.post("/api/check-quality-batch")
+async def check_quality_batch(
+    files: List[UploadFile] = File(..., description="Files to quality-check before OCR"),
+    min_sharpness:   float = Query(2.0,   description="Minimum gradient kurtosis (sharpness)"),
+    min_brightness:  float = Query(25.0,  description="Minimum mean pixel brightness (0-255)"),
+    max_brightness:  float = Query(245.0, description="Maximum mean pixel brightness (0-255)"),
+    min_contrast:    float = Query(15.0,  description="Minimum std-dev of pixel values (contrast)"),
+):
+    """Run pre-OCR quality checks on multiple files without performing OCR."""
+    results = []
+    for file in files:
+        file_path = None
+        try:
+            if not is_allowed_file(file.filename):
+                results.append({
+                    "filename": file.filename,
+                    "file_size": 0,
+                    "passed": False,
+                    "blur_score": 0.0,
+                    "brightness": 0.0,
+                    "contrast": 0.0,
+                    "reason": "Unsupported file type",
+                })
+                continue
+
+            content = await file.read()
+            file_size = len(content)
+
+            if file_size > MAX_FILE_SIZE:
+                results.append({
+                    "filename": file.filename,
+                    "file_size": file_size,
+                    "passed": False,
+                    "blur_score": 0.0,
+                    "brightness": 0.0,
+                    "contrast": 0.0,
+                    "reason": "File too large (max 50MB)",
+                })
+                continue
+
+            file_type = get_file_type(file.filename)
+            file_path = UPLOAD_DIR / file.filename
+            with open(file_path, "wb") as f:
+                f.write(content)
+
+            quality = check_document_quality(
+                str(file_path), file_type,
+                sharpness_threshold=min_sharpness,
+                min_brightness=min_brightness,
+                max_brightness=max_brightness,
+                min_contrast=min_contrast,
+            )
+            results.append({
+                "filename": file.filename,
+                "file_size": file_size,
+                **quality,
+            })
+        except Exception as e:
+            results.append({
+                "filename": getattr(file, "filename", "unknown"),
+                "file_size": 0,
+                "passed": False,
+                "blur_score": 0.0,
+                "brightness": 0.0,
+                "contrast": 0.0,
+                "reason": str(e),
+            })
+        finally:
+            if file_path and file_path.exists():
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+
+    passed = sum(1 for r in results if r["passed"])
+    print(f"Quality check: {passed}/{len(results)} passed")
+    return {"results": results, "total": len(results), "passed": passed}
+
+
 @app.post("/api/upload-batch")
 async def upload_and_process_batch(
     files: List[UploadFile] = File(
         ..., description="Multiple PDF or Image files to process"
     ),
+    force: bool = Query(False, description="Skip quality-check blocking and process regardless"),
 ):
     """Upload multiple PDF/Image files and convert each to Markdown sequentially"""
     if not files:
@@ -315,6 +409,27 @@ async def upload_and_process_batch(
                 f"\n[{idx}/{total}] Processing [{file_type.upper()}]: {file.filename} ({file_size / 1024:.1f} KB)"
             )
 
+            # Pre-OCR quality check
+            quality = check_document_quality(str(file_path), file_type)
+            print(f"  Quality — blur={quality['blur_score']} brightness={quality['brightness']} contrast={quality['contrast']}")
+            if not quality["passed"]:
+                if force:
+                    print(f"  ⚠ Quality warning (force=true, proceeding): {quality['reason']}")
+                else:
+                    print(f"  ✗ {quality['reason']}")
+                    results.append(
+                        {
+                            "success": False,
+                            "filename": file.filename,
+                            "markdown_content": "",
+                            "file_size": file_size,
+                            "processing_time": time.time() - start_time,
+                            "file_type": file_type,
+                            "error": quality["reason"],
+                        }
+                    )
+                    continue
+
             def _process_file(fpath):
                 converter = PdfConverter(artifact_dict=app_data["models"])
                 rendered = converter(str(fpath))
@@ -355,6 +470,9 @@ async def upload_and_process_batch(
                     "processing_time": processing_time,
                     "file_type": file_type,
                     "error": "",
+                    "blur_score": quality["blur_score"],
+                    "brightness": quality["brightness"],
+                    "contrast": quality["contrast"],
                 }
             )
         except Exception as e:

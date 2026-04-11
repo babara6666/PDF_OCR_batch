@@ -1,3 +1,13 @@
+# Claude Code
+.claude/
+
+# Local Anaconda env data
+Anacondaenvspdf_ocr_opdata/
+
+# Local planning docs
+*.md
+!README.md
+
 private.py
 .DS_Store
 local.env

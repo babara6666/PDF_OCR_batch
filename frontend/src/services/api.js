@@ -52,19 +52,65 @@ export const uploadPDF = async (file, onProgress) => {
 };
 
 /**
+ * Run quality checks on multiple files without performing OCR.
+ * @param {File[]} files - Files to check
+ * @param {Object} thresholds - { minSharpness, minBrightness, maxBrightness, minContrast }
+ * @param {Function} onProgress - Upload progress callback (0-100)
+ * @returns {Promise} Response with { results, total, passed }
+ */
+export const checkQualityBatch = async (files, thresholds = {}, onProgress) => {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("files", file));
+
+  const {
+    minSharpness   = 2.0,
+    minBrightness  = 25.0,
+    maxBrightness  = 245.0,
+    minContrast    = 15.0,
+  } = thresholds;
+
+  const params = new URLSearchParams({
+    min_sharpness:  minSharpness,
+    min_brightness: minBrightness,
+    max_brightness: maxBrightness,
+    min_contrast:   minContrast,
+  });
+
+  try {
+    const response = await api.post(`/api/check-quality-batch?${params}`, formData, {
+      timeout: 60_000 + files.length * 30_000,
+      onUploadProgress: (progressEvent) => {
+        const pct = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+        if (onProgress) onProgress(pct);
+      },
+    });
+    return response.data;
+  } catch (error) {
+    if (error.response) {
+      throw new Error(error.response.data.detail || error.response.data.error || "Quality check failed");
+    } else if (error.request) {
+      throw new Error("No response from server. Is the backend running?");
+    } else {
+      throw new Error(error.message || "Quality check failed");
+    }
+  }
+};
+
+/**
  * Upload multiple PDF/image files for batch OCR
  * @param {File[]} files - Array of files to upload
  * @param {Function} onProgress - Upload progress callback (0-100)
+ * @param {boolean} force - Skip quality-check blocking
  * @returns {Promise} Response with { results, total, succeeded }
  */
-export const uploadBatch = async (files, onProgress) => {
+export const uploadBatch = async (files, onProgress, force = false) => {
   const formData = new FormData();
   files.forEach((file) => {
     formData.append("files", file);
   });
 
   try {
-    const response = await api.post("/api/upload-batch", formData, {
+    const response = await api.post(`/api/upload-batch?force=${force}`, formData, {
       timeout: 300_000 + files.length * 600_000, // 5min base + 10min per file
       onUploadProgress: (progressEvent) => {
         const percentCompleted = Math.round(
