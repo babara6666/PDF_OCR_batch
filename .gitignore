@@ -1,8 +1,13 @@
 # Claude Code
 .claude/
+.codex/
 
 # Local Anaconda env data
 Anacondaenvspdf_ocr_opdata/
+.ruff_cache/
+.tmp/
+tmp/
+temp/
 
 # Local planning docs
 *.md
@@ -230,3 +235,9 @@ desktop.ini
 secrets.json
 keys/
 credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519

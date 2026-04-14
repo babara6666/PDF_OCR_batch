@@ -46,9 +46,7 @@ Template parameters (fraction of page size)
 
 import base64
 import io
-import os
 import re
-from pathlib import Path
 from typing import Tuple
 
 import pypdfium2 as pdfium

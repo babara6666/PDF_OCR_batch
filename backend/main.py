@@ -10,22 +10,23 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 import torch
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import filetype
 
 # Load environment variables
 load_dotenv()
 
-# Marker imports
-from marker.converters.pdf import PdfConverter
-from marker.models import create_model_dict
-from marker.output import text_from_rendered
+# Marker imports — must come after load_dotenv() so env vars are set first
+from marker.converters.pdf import PdfConverter  # noqa: E402
+from marker.models import create_model_dict  # noqa: E402
+from marker.output import text_from_rendered  # noqa: E402
 
-# Notes extraction — imported lazily inside each endpoint
-from quality_checker import check_document_quality
+from quality_checker import check_document_quality  # noqa: E402
 
 # Configuration
 API_TITLE = "PDF/Image OCR Service (Marker)"
@@ -65,6 +66,20 @@ ALLOWED_EXTENSIONS = {
     ".tif",
 }
 
+# Magic-bytes MIME prefixes accepted for each category
+ALLOWED_MIMES = {
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+}
+
+# Maximum number of files allowed in a single batch request
+MAX_BATCH_FILES = 50
+
 # Global state
 app_data = {}
 
@@ -82,6 +97,11 @@ class OCRResponse(BaseModel):
     contrast: float = 0.0
 
 
+def sanitize_filename(filename: str) -> str:
+    """Strip any directory components to prevent path traversal."""
+    return Path(filename).name
+
+
 def get_file_extension(filename: str) -> str:
     """Get lowercase file extension"""
     return Path(filename).suffix.lower()
@@ -92,12 +112,32 @@ def is_allowed_file(filename: str) -> bool:
     return get_file_extension(filename) in ALLOWED_EXTENSIONS
 
 
+def validate_file_content(content: bytes) -> bool:
+    """Validate file by magic bytes, not just extension."""
+    kind = filetype.guess(content)
+    if kind is None:
+        return False
+    return kind.mime in ALLOWED_MIMES
+
+
 def get_file_type(filename: str) -> str:
     """Get file type category"""
     ext = get_file_extension(filename)
     if ext == ".pdf":
         return "pdf"
     return "image"
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add basic security headers to every response."""
+
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["X-XSS-Protection"] = "0"  # Modern browsers use CSP instead
+        return response
 
 
 @asynccontextmanager
@@ -147,16 +187,20 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Accept"],
 )
+
+# Security headers
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    print(f"Unhandled exception on {request.url.path}: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"success": False, "error": str(exc)},
+        content={"success": False, "error": "Internal server error"},
     )
 
 
@@ -211,8 +255,15 @@ async def upload_and_process_file(
         if file_size > MAX_FILE_SIZE:
             raise HTTPException(status_code=400, detail="File too large (max 50MB)")
 
-        # Save to temp file
-        file_path = UPLOAD_DIR / file.filename
+        # Validate file content by magic bytes
+        if not validate_file_content(content):
+            raise HTTPException(
+                status_code=400, detail="File content does not match a supported type"
+            )
+
+        # Sanitize filename to prevent path traversal
+        safe_filename = sanitize_filename(file.filename)
+        file_path = UPLOAD_DIR / safe_filename
         with open(file_path, "wb") as f:
             f.write(content)
 
@@ -260,13 +311,13 @@ async def upload_and_process_file(
         raise
     except Exception as e:
         print(f"✗ Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Processing failed")
     finally:
         # Cleanup
         if file_path and file_path.exists():
             try:
                 os.remove(file_path)
-            except:
+            except Exception:
                 pass
 
 
@@ -279,6 +330,12 @@ async def check_quality_batch(
     min_contrast:    float = Query(15.0,  description="Minimum std-dev of pixel values (contrast)"),
 ):
     """Run pre-OCR quality checks on multiple files without performing OCR."""
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files. Maximum {MAX_BATCH_FILES} files per request.",
+        )
+
     results = []
     for file in files:
         file_path = None
@@ -310,8 +367,21 @@ async def check_quality_batch(
                 })
                 continue
 
+            if not validate_file_content(content):
+                results.append({
+                    "filename": file.filename,
+                    "file_size": file_size,
+                    "passed": False,
+                    "blur_score": 0.0,
+                    "brightness": 0.0,
+                    "contrast": 0.0,
+                    "reason": "File content does not match a supported type",
+                })
+                continue
+
             file_type = get_file_type(file.filename)
-            file_path = UPLOAD_DIR / file.filename
+            safe_filename = sanitize_filename(file.filename)
+            file_path = UPLOAD_DIR / safe_filename
             with open(file_path, "wb") as f:
                 f.write(content)
 
@@ -328,6 +398,7 @@ async def check_quality_batch(
                 **quality,
             })
         except Exception as e:
+            print(f"  ✗ Quality check error for {getattr(file, 'filename', 'unknown')}: {e}")
             results.append({
                 "filename": getattr(file, "filename", "unknown"),
                 "file_size": 0,
@@ -335,7 +406,7 @@ async def check_quality_batch(
                 "blur_score": 0.0,
                 "brightness": 0.0,
                 "contrast": 0.0,
-                "reason": str(e),
+                "reason": "Quality check failed",
             })
         finally:
             if file_path and file_path.exists():
@@ -359,6 +430,12 @@ async def upload_and_process_batch(
     """Upload multiple PDF/Image files and convert each to Markdown sequentially"""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
+
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files. Maximum {MAX_BATCH_FILES} files per request.",
+        )
 
     results = []
     total = len(files)
@@ -400,8 +477,19 @@ async def upload_and_process_batch(
                 )
                 continue
 
+            if not validate_file_content(content):
+                results.append(
+                    {
+                        "success": False,
+                        "filename": file.filename,
+                        "error": "File content does not match a supported type",
+                    }
+                )
+                continue
+
             file_type = get_file_type(file.filename)
-            file_path = UPLOAD_DIR / file.filename
+            safe_filename = sanitize_filename(file.filename)
+            file_path = UPLOAD_DIR / safe_filename
             with open(file_path, "wb") as f:
                 f.write(content)
 
@@ -486,14 +574,14 @@ async def upload_and_process_batch(
                     "file_size": 0,
                     "processing_time": processing_time,
                     "file_type": "",
-                    "error": str(e),
+                    "error": "Processing failed",
                 }
             )
         finally:
             if file_path and file_path.exists():
                 try:
                     os.remove(file_path)
-                except:
+                except Exception:
                     pass
 
     succeeded = sum(1 for r in results if r["success"])
@@ -539,7 +627,13 @@ async def extract_notes_single(
         if file_size > MAX_FILE_SIZE:
             raise HTTPException(status_code=400, detail="File too large (max 50MB)")
 
-        file_path = UPLOAD_DIR / file.filename
+        if not validate_file_content(content):
+            raise HTTPException(
+                status_code=400, detail="File content does not match a supported type"
+            )
+
+        safe_filename = sanitize_filename(file.filename)
+        file_path = UPLOAD_DIR / safe_filename
         with open(file_path, "wb") as f:
             f.write(content)
 
@@ -572,7 +666,7 @@ async def extract_notes_single(
     except Exception as e:
         print(f"✗ Error: {e}")
         raise HTTPException(
-            status_code=500, detail=f"Notes extraction failed: {str(e)}"
+            status_code=500, detail="Notes extraction failed"
         )
     finally:
         if file_path and file_path.exists():
@@ -598,6 +692,12 @@ async def extract_notes_batch(
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
+
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files. Maximum {MAX_BATCH_FILES} files per request.",
+        )
 
     results = []
     total = len(files)
@@ -649,7 +749,23 @@ async def extract_notes_batch(
                 )
                 continue
 
-            file_path = UPLOAD_DIR / file.filename
+            if not validate_file_content(content):
+                results.append(
+                    {
+                        "success": False,
+                        "filename": file.filename,
+                        "notes_text": None,
+                        "crop_image_b64": None,
+                        "crop_bbox": None,
+                        "error": "File content does not match a supported type",
+                        "processing_time": 0.0,
+                        "file_size": file_size,
+                    }
+                )
+                continue
+
+            safe_filename = sanitize_filename(file.filename)
+            file_path = UPLOAD_DIR / safe_filename
             with open(file_path, "wb") as f:
                 f.write(content)
 
@@ -703,7 +819,7 @@ async def extract_notes_batch(
                     "notes_text": None,
                     "crop_image_b64": None,
                     "crop_bbox": None,
-                    "error": str(e),
+                    "error": "Processing failed",
                     "processing_time": processing_time,
                     "file_size": 0,
                 }
