@@ -8,7 +8,7 @@ services:
     build:
       args:
         # CUDA 12.1 wheels (~2 GB download); adjust tag to match your driver
-        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu126
     deploy:
       resources:
         reservations:
