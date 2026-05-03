@@ -1,0 +1,41 @@
+# ── Git & IDE ─────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.vscode/
+.claude/
+.ruff_cache/
+
+# ── Python cache / build artifacts ────────────────────────────────────────────
+**/__pycache__/
+**/*.py[cod]
+*.egg-info/
+dist/
+.venv/
+
+# ── Node / frontend build artifacts ───────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+deploy/frontend/node_modules/
+deploy/frontend/dist/
+
+# ── Secrets (never bake into images) ──────────────────────────────────────────
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+
+# ── Large runtime data (not needed in image) ──────────────────────────────────
+Anacondaenvspdf_ocr_opdata/
+backend/uploads/
+data/
+static/
+
+# ── Sample / test files ───────────────────────────────────────────────────────
+*.pdf
+
+# ── Docs (not needed at runtime) ──────────────────────────────────────────────
+*.md
+!README.md
+LICENSE
+MODEL_LICENSE

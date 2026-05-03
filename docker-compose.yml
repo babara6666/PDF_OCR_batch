@@ -1,0 +1,72 @@
+services:
+  # ── Backend: FastAPI + Marker OCR ─────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args:
+        # CPU-only PyTorch by default; override in docker-compose.gpu.yml
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    image: printlens-backend:latest
+    container_name: printlens-backend
+    restart: unless-stopped
+    # Backend port is NOT exposed to host — all traffic enters via nginx on port 80.
+    # Uncomment the line below only for direct debugging access:
+    # ports:
+    #   - "8001:8001"
+    volumes:
+      - model_cache:/models          # Persist HF + Torch model downloads
+      - surya_cache:/home/app/.cache # Persist surya/datalab model downloads
+      - upload_tmp:/app/backend/uploads
+    env_file:
+      - path: .env
+        required: false      # Fine to omit; env vars below serve as defaults
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8001"
+      CORS_ORIGINS: "http://localhost,http://localhost:80,http://127.0.0.1"
+      FONT_DIR: /models/fonts
+      FONT_PATH: /models/fonts/GoNotoCurrent-Regular.ttf
+    networks:
+      - app-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/health')"
+      interval: 30s
+      timeout: 10s
+      start_period: 900s    # Allow time for model downloads on first run (~4-5GB total)
+      retries: 5
+
+  # ── Frontend: React/Vite → nginx ──────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        # "/" → axios uses relative URLs; nginx proxies /api/* to backend
+        VITE_API_BASE_URL: /
+    image: printlens-frontend:latest
+    container_name: printlens-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app-net
+
+volumes:
+  model_cache:
+    driver: local
+  surya_cache:
+    driver: local
+  upload_tmp:
+    driver: local
+
+networks:
+  app-net:
+    driver: bridge

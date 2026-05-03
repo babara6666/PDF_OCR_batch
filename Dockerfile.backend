@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1
+# ─── Stage 1: dependency builder ──────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git \
+        libgl1 libglib2.0-0 libsm6 libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --upgrade pip
+
+# Install PyTorch separately so we can swap CPU/CUDA index via build arg.
+# Default: CPU-only (~200 MB vs ~2 GB for CUDA wheel).
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torch --index-url "${TORCH_INDEX_URL}"
+
+# Install all runtime Python deps from backend/requirements.txt.
+# This covers both the FastAPI server and the Marker OCR library deps.
+COPY backend/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install the marker package (project root) without re-installing deps.
+COPY pyproject.toml ./
+COPY README.md ./
+COPY marker/ ./marker/
+RUN pip install --no-cache-dir --no-deps .
+
+# surya.ocr_error uses transformers.onnx which was removed long ago — stub it out
+RUN python - <<'EOF'
+import os, surya
+init_path = os.path.join(os.path.dirname(surya.__file__), "ocr_error/__init__.py")
+open(init_path, "w").write("""
+class _Results:
+    def __init__(self, n):
+        self.labels = ["good"] * n
+
+class OCRErrorPredictor:
+    def __init__(self, *args, **kwargs):
+        self.disable_tqdm = False
+    def __call__(self, page_texts, batch_size=None):
+        return _Results(len(page_texts))
+""")
+print("Stubbed surya/ocr_error/__init__.py")
+EOF
+
+# ─── Stage 2: lean runtime image ──────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+WORKDIR /app
+
+# Runtime shared-library deps only (no compiler toolchain)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 libsm6 libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user for security
+RUN groupadd -r app && useradd -r -g app -u 1000 -m -d /home/app app
+
+# Copy the full Python package tree from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages \
+                    /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application source
+COPY backend/ ./backend/
+
+# Pre-create all writable directories so Docker named volumes inherit
+# app:app ownership on first mount instead of defaulting to root.
+RUN mkdir -p \
+        /app/backend/uploads \
+        /home/app/.cache/datalab \
+        /models/fonts \
+        /models/torch \
+    && chown -R app:app /app /home/app /models
+
+# Hugging Face & Torch model cache → mount a persistent volume here
+ENV HF_HOME=/models \
+    TORCH_HOME=/models/torch \
+    HOST=0.0.0.0 \
+    PORT=8001
+
+USER app
+WORKDIR /app/backend
+
+EXPOSE 8001
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+    CMD python -c \
+        "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/health')" \
+    || exit 1
+
+CMD ["python", "main.py"]

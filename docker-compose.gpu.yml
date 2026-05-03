@@ -1,0 +1,20 @@
+# GPU override — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+#
+# Requires NVIDIA Container Toolkit:
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+services:
+  backend:
+    build:
+      args:
+        # CUDA 12.1 wheels (~2 GB download); adjust tag to match your driver
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"

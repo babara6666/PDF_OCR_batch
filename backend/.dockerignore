@@ -1,0 +1,16 @@
+# Secrets
+.env
+.env.*
+
+# Runtime temp files
+uploads/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ruff_cache/
+
+# Dev artifacts
+*.md

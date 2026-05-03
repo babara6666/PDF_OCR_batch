@@ -1,0 +1,12 @@
+# Build output (rebuilt inside Docker)
+node_modules/
+dist/
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Logs & OS artifacts
+*.log
+.DS_Store
