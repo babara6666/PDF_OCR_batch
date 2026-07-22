@@ -5,71 +5,77 @@ Pipeline
 --------
 1. Render the first page of the PDF to a PIL Image.
 2. Auto-detect page orientation (landscape vs. portrait).
-3. Crop the 'Notes:' text region using orientation-specific template coordinates.
-   The crop deliberately excludes stamps and mechanical drawings so those
-   graphical elements never interfere with OCR.
-4. Run Surya detection + recognition **directly** on the cropped image.
+3. Locate the 'Notes:' region — two strategies in priority order:
+
+   A) YOLO detection  (preferred when a trained model is available)
+      ──────────────────────────────────────────────────────────────
+      Pass a loaded ``YOLONotesDetector`` instance via the
+      ``yolo_detector`` parameter.  If the model returns a confident
+      detection its bounding box is used directly as the crop region.
+
+   B) Template-based fallback  (used when YOLO is unavailable or fails)
+      ────────────────────────────────────────────────────────────────────
+      Fixed fractional coordinates tuned per orientation:
+
+        LANDSCAPE (width > height)
+        ──────────────────────────
+        ┌──────────────────────────────────────────────────────────────────┐
+        │ Header rows                                          0 – 12 %   │
+        ├────────────────────────┬─────────────────────────────────────────┤
+        │                        │ X_MIN(~64%)                            │
+        │   Technical drawings   │  Notes:       ← Y_MIN (~12%)           │
+        │   (left ~64%)          │  1. Materials                          │
+        │                        │  …                  ← Y_MAX (~50%)     │
+        │                        │  [stamps excluded]                     │
+        ├────────────────────────┴─────────────────────────────────────────┤
+        │ Specification table                                 52 – 85 %   │
+        └──────────────────────────────────────────────────────────────────┘
+
+        PORTRAIT (height > width)  — same physical page, scanned sideways
+        ──────────────────────────
+        ┌───────────────────────────────────────────────────┐
+        │ Company header  │  Drawing NO. row               │ 0 – 7 %
+        ├─────────────────────────────────────────────────  │
+        │ X_MIN(~12%)   X_MAX(~65%)  │ spec table cols     │
+        │  Notes:    ← Y_MIN(~6%)    │                     │
+        │  1. Materials              │                     │
+        │  …          ← Y_MAX(~40%) │                     │
+        │  ─────────────────────────────────────────────   │
+        │  Technical drawing (screw diagram)  — excluded   │
+        └───────────────────────────────────────────────────┘
+
+4. Crop the Notes text region and resize if needed (GPU VRAM guard).
+5. Run Surya detection + recognition **directly** on the cropped image.
    (The full Marker pipeline is deliberately bypassed: its layout model
    classifies regions that contain stamps / technical drawings as 'Figure'
    blocks and skips OCR on them entirely, returning '![](...jpeg)' output.)
-
-Template parameters (fraction of page size)
--------------------------------------------
-
-  LANDSCAPE (width > height)
-  ──────────────────────────
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ Header rows                                          0 – 12 %   │
-  ├────────────────────────┬─────────────────────────────────────────┤
-  │                        │ X_MIN(~64%)                            │
-  │   Technical drawings   │  Notes:       ← Y_MIN (~12%)           │
-  │   (left ~64%)          │  1. Materials                          │
-  │                        │  …                  ← Y_MAX (~50%)     │
-  │                        │  [stamps excluded]                     │
-  ├────────────────────────┴─────────────────────────────────────────┤
-  │ Specification table                                 52 – 85 %   │
-  └──────────────────────────────────────────────────────────────────┘
-
-  PORTRAIT (height > width)  — same physical page, scanned sideways
-  ──────────────────────────
-  ┌───────────────────────────────────────────────────┐
-  │ Company header  │  Drawing NO. row               │ 0 – 7 %
-  ├─────────────────────────────────────────────────  │
-  │ X_MIN(~12%)   X_MAX(~65%)  │ spec table cols     │
-  │  Notes:    ← Y_MIN(~6%)    │                     │
-  │  1. Materials              │                     │
-  │  …          ← Y_MAX(~40%) │                     │
-  │  ─────────────────────────────────────────────   │
-  │  Technical drawing (screw diagram)  — excluded   │
-  └───────────────────────────────────────────────────┘
 """
 
 import base64
 import io
+import os
 import re
-from typing import Tuple
+from pathlib import Path
+from typing import Optional, Tuple
 
 import pypdfium2 as pdfium
 from PIL import Image
 
 # ---------------------------------------------------------------------------
-# Template crop parameters — tune per orientation
+# Template crop parameters — used as fallback when YOLO is unavailable
 # ---------------------------------------------------------------------------
 
 # ── Landscape (width > height) ──────────────────────────────────────────────
-LAND_X_MIN = 0.62  # Notes left  edge (slightly wider margin than ~64%)
-LAND_X_MAX = 0.92  # Notes right edge (~92 % from left)
-LAND_Y_MIN = 0.09  # Notes top  — raised from 0.12 to capture headers near the top
-LAND_Y_MAX = 0.53  # Notes text bottom — lowered from 0.50 for drawings with more items
+LAND_X_MIN = 0.62
+LAND_X_MAX = 0.92
+LAND_Y_MIN = 0.09
+LAND_Y_MAX = 0.53
 
 # ── Portrait (height > width) ───────────────────────────────────────────────
-# Surya OCR (detection+recognition) is used directly, so mechanical drawings
-# inside the crop (e.g. screw diagrams) will produce no text detections and
-# are harmless — allowing wider Y bounds without OCR contamination.
-PORT_X_MIN = 0.08  # Notes left  edge — reduced from 0.12 so item numbers (1./2.) near the left edge are not cut
-PORT_X_MAX = 0.73  # Notes right edge — extended from 0.65; some drawings have Notes boxes reaching ~67-68 %
-PORT_Y_MIN = 0.05  # Notes top  — 0.02 was too high (captured Drawing NO. header row)
-PORT_Y_MAX = 0.40  # Notes text bottom — reduced from 0.44 to avoid spec-table rows leaking in
+PORT_X_MIN = 0.08
+PORT_X_MAX = 0.73
+PORT_Y_MIN = 0.05
+PORT_Y_MAX = 0.40
 
 # Render DPI for the crop image sent to OCR.
 RENDER_DPI = 150
@@ -110,14 +116,33 @@ def _crop_notes_region(
     y_max: float,
 ) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
     """
-    Crop the Notes text region from a rendered page image.
-    Returns ``(cropped_image, (x0, y0, x1, y1))`` in pixels.
+    Crop the Notes text region from a rendered page image using fractional
+    coordinates.  Returns ``(cropped_image, (x0, y0, x1, y1))`` in pixels.
     """
     w, h = page_image.size
     x0 = int(w * x_min)
     y0 = int(h * y_min)
     x1 = int(w * x_max)
     y1 = int(h * y_max)
+    return page_image.crop((x0, y0, x1, y1)), (x0, y0, x1, y1)
+
+
+def _crop_notes_region_pixels(
+    page_image: Image.Image,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
+    """
+    Crop using absolute pixel coordinates (from YOLO detection).
+    Clamps values to image bounds.
+    """
+    iw, ih = page_image.size
+    x0 = max(0, min(x0, iw))
+    y0 = max(0, min(y0, ih))
+    x1 = max(0, min(x1, iw))
+    y1 = max(0, min(y1, ih))
     return page_image.crop((x0, y0, x1, y1)), (x0, y0, x1, y1)
 
 
@@ -154,17 +179,9 @@ def _ocr_image_surya(
     ----------
     max_col_frac : optional spatial filter (0–1).  Detected bboxes whose
                    **centre-X** exceeds this fraction of the crop width are
-                   discarded before recognition.  Use ~0.70 for portrait crops
+                   discarded before recognition.  Use ~0.80 for portrait crops
                    to exclude spec-table columns that occupy the right portion
-                   of the crop without narrowing the crop itself (which would
-                   cut Notes lines short on the right).
-
-    Steps
-    -----
-    1. Call ``detection_model`` to locate text-line bounding boxes.
-    2. Filter by confidence AND optional centre-X spatial guard.
-    3. Call ``recognition_model`` with the remaining polygons.
-    4. Collect and return the recognised text lines joined by newline.
+                   of the crop without narrowing the crop itself.
     """
     from surya.common.surya.schema import TaskNames
 
@@ -184,8 +201,6 @@ def _ocr_image_surya(
     crop_w = crop_image.size[0]
 
     # ── Step 2: filter by confidence + optional spatial guard ──────────────
-    # Spatial guard: bboxes whose centre-X is in the right (1-max_col_frac)
-    # portion of the crop are spec-table columns → skip them.
     polygons = []
     skipped_spatial = 0
     for bbox in det_result.bboxes:
@@ -199,10 +214,7 @@ def _ocr_image_surya(
                 continue
         polygons.append([[int(p[0]), int(p[1])] for p in bbox.polygon])
 
-    # Sort polygons top-to-bottom by their topmost Y coordinate so that the
-    # recognition output follows the visual reading order (Notes: → 1 → 2 → …).
-    # Surya's own sort_lines can mis-order lines in complex portrait layouts,
-    # so we sort here and pass sort_lines=False to preserve our order.
+    # Sort top-to-bottom so recognition output follows visual reading order.
     polygons.sort(key=lambda poly: (min(p[1] for p in poly), min(p[0] for p in poly)))
 
     spatial_note = (
@@ -225,7 +237,7 @@ def _ocr_image_surya(
         polygons=[polygons],
         input_text=[[""] * len(polygons)],
         recognition_batch_size=16,
-        sort_lines=False,  # polygons are pre-sorted top-to-bottom; preserve order
+        sort_lines=False,
         math_mode=True,
         drop_repeated_text=False,
         max_sliding_window=2148,
@@ -259,16 +271,14 @@ def _clean_notes_text(text: str) -> str:
       2) numbered items (1,2,3...) in numeric order
       3) remaining lines (e.g. Chinese translations)
 
-    Also drops obvious non-notes noise such as Drawing NO. rows
-    and tiny garbled fragments.
+    Also drops obvious non-notes noise such as Drawing NO. rows,
+    spec-table column headers, and tiny garbled fragments.
     """
     if not text:
         return ""
 
     raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    # Spec-table column headers and pure-numeric rows that can leak into the
-    # Notes crop when the spec table appears just below the Notes box.
     _SPEC_NOISE_EXACT = re.compile(
         r"^(?:"
         r"Case\s*Depth"
@@ -281,23 +291,21 @@ def _clean_notes_text(text: str) -> str:
         r"|kgf[\s·]*cm"
         r"|lb-in\.?"
         r"|Nm"
-        r"|Eht\s*\d+.*"          # e.g. "Eht 400 HV0.3"
-        r"|Min|Max"              # standalone column sub-headers
-        r"|Ref\.$"               # lone "Ref." column label (but NOT "Ref. DIN…" which has more text)
-        r"|RF-[A-Z0-9\-]+"       # drawing number strings leaked from header (e.g. RF-A1-0378-1)
-        r"|Torsion\s*Stre.*"     # "Torsion Strength" column header variants
-        r"|渗碳層\s*mm|滲碳層\s*mm"  # "Case Depth mm" Chinese label
+        r"|Eht\s*\d+.*"
+        r"|Min|Max"
+        r"|Ref\.$"
+        r"|RF-[A-Z0-9\-]+"
+        r"|Torsion\s*Stre.*"
+        r"|渗碳層\s*mm|滲碳層\s*mm"
         r")$",
         re.IGNORECASE,
     )
     _PURE_NUMERIC = re.compile(r"^[\d.,\s~±\-/×≥≤<>°%]+$")
 
     def _is_spec_noise(line: str) -> bool:
-        """Return True if *line* looks like a spec-table header/value, not a Note."""
         return bool(_PURE_NUMERIC.fullmatch(line) or _SPEC_NOISE_EXACT.fullmatch(line))
 
-    # 1) Basic cleanup: remove tiny noise, leaked non-notes headers, and
-    #    spec-table content that leaked in from below the Notes box.
+    # 1) Basic cleanup
     cleaned = []
     for line in raw_lines:
         line = re.sub(r"\s+", " ", line).strip()
@@ -311,7 +319,7 @@ def _clean_notes_text(text: str) -> str:
             continue
         cleaned.append(line)
 
-    # 2) De-duplicate near-identical OCR lines.
+    # 2) De-duplicate near-identical OCR lines
     deduped = []
     seen = set()
     for line in cleaned:
@@ -323,7 +331,7 @@ def _clean_notes_text(text: str) -> str:
         seen.add(key)
         deduped.append(line)
 
-    # 3) Classify lines.
+    # 3) Classify lines
     notes_header = []
     numbered = {}
     english_rest = []
@@ -334,8 +342,6 @@ def _clean_notes_text(text: str) -> str:
             notes_header.append("Notes:")
             continue
 
-        # Accept OCR variants: "1.Material", "1) Material", "1 Material"
-        # but reject fractions like "5/16: C10B21".
         m = re.match(r"^\s*(\d{1,2})(?!\s*/\s*\d)\s*[\.):]?\s*(.+?)\s*$", line)
         if m:
             idx = int(m.group(1))
@@ -344,7 +350,6 @@ def _clean_notes_text(text: str) -> str:
                 numbered.setdefault(idx, f"{idx}. {body}")
             continue
 
-        # Materials continuation lines (e.g. "5/16: C10B21")
         if re.match(r"^\s*#?\d+\s*/\s*\d+\s*:\s*.+$", line, re.IGNORECASE):
             if 1 in numbered and re.search(r"material", numbered[1], re.IGNORECASE):
                 numbered[1] = f"{numbered[1]}\n{line}"
@@ -357,8 +362,7 @@ def _clean_notes_text(text: str) -> str:
         else:
             english_rest.append(line)
 
-    # 4) If OCR dropped a leading number, try to fill missing indices with
-    #    note-like unnumbered English lines.
+    # 4) Fill missing numbered indices with unnumbered note-like lines
     if numbered and english_rest:
         note_like = []
         non_note_like = []
@@ -382,7 +386,7 @@ def _clean_notes_text(text: str) -> str:
 
         english_rest = non_note_like
 
-    # 5) Attach known Chinese translations to matching English numbered lines.
+    # 5) Attach Chinese translations to matching English numbered lines
     attached = {}
     unmatched_translation = []
     map_rules = [
@@ -413,7 +417,7 @@ def _clean_notes_text(text: str) -> str:
         else:
             attached.setdefault(target_idx, []).append(line)
 
-    # 6) Build final order.
+    # 6) Build final order
     ordered = []
     if notes_header:
         ordered.append("Notes:")
@@ -439,18 +443,10 @@ def extract_notes_from_pdf(
     page_idx: int = 0,
     dpi: int = RENDER_DPI,
     include_crop_image: bool = True,
+    yolo_detector=None,  # YOLONotesDetector | None
 ) -> dict:
     """
     Extract the Notes section from a scanned engineering drawing PDF.
-
-    Steps
-    -----
-    1. Render the PDF page to a PIL Image at *dpi* resolution.
-    2. Auto-detect page orientation (landscape / portrait).
-    3. Select the appropriate template crop coordinates.
-    4. Crop the Notes text region and resize if needed (GPU memory guard).
-    5. Run Surya detection + recognition directly (bypasses Marker layout).
-    6. Return the recognised text and an optional base64 PNG of the crop.
 
     Parameters
     ----------
@@ -459,16 +455,20 @@ def extract_notes_from_pdf(
     page_idx          : 0-based page index (Notes is usually on page 0)
     dpi               : render resolution (default: RENDER_DPI = 150)
     include_crop_image: if True, include a base64 PNG of the Notes crop
+    yolo_detector     : optional loaded ``YOLONotesDetector``.
+                        When provided, YOLO detection is tried first and
+                        template-based cropping is used only as a fallback.
 
     Returns
     -------
     dict with:
-        success        (bool)
-        notes_text     (str | None)   — OCR'd text of the Notes section
-        crop_bbox      ([x0,y0,x1,y1] in pixels at *dpi* | None)
-        orientation    (str)          — "landscape" or "portrait"
-        error          (str | None)
-        crop_image_b64 (base64 PNG | None)
+        success           (bool)
+        notes_text        (str | None)
+        crop_bbox         ([x0,y0,x1,y1] in pixels at *dpi* | None)
+        orientation       (str)         — "landscape" or "portrait"
+        detection_method  (str)         — "yolo" | "template"
+        error             (str | None)
+        crop_image_b64    (base64 PNG | None)
     """
     # ------------------------------------------------------------------
     # Step 1 — Render the page
@@ -481,6 +481,7 @@ def extract_notes_from_pdf(
             "notes_text": None,
             "crop_bbox": None,
             "orientation": None,
+            "detection_method": None,
             "error": f"Failed to render page {page_idx}: {exc}",
             "crop_image_b64": None,
         }
@@ -489,23 +490,46 @@ def extract_notes_from_pdf(
     print(f"[Notes] Page rendered: {img_w}×{img_h} px  (dpi={dpi})")
 
     # ------------------------------------------------------------------
-    # Step 2 — Detect orientation & pick crop parameters
+    # Step 2 — Detect orientation
     # ------------------------------------------------------------------
     orientation = _detect_orientation(page_image)
-    if orientation == "landscape":
-        x_min, x_max, y_min, y_max = LAND_X_MIN, LAND_X_MAX, LAND_Y_MIN, LAND_Y_MAX
-    else:
-        x_min, x_max, y_min, y_max = PORT_X_MIN, PORT_X_MAX, PORT_Y_MIN, PORT_Y_MAX
-
-    print(
-        f"[Notes] Orientation: {orientation}  crop=({x_min},{y_min})→({x_max},{y_max})"
-    )
 
     # ------------------------------------------------------------------
-    # Step 3 — Crop the Notes text region
+    # Step 3 — Locate Notes region: YOLO first, template as fallback
     # ------------------------------------------------------------------
-    crop, bbox = _crop_notes_region(page_image, x_min, x_max, y_min, y_max)
-    print(f"[Notes] Crop bbox: {bbox}  size: {crop.size[0]}×{crop.size[1]} px")
+    detection_method = "template"
+    crop = None
+    bbox = None
+
+    if yolo_detector is not None and yolo_detector.is_loaded:
+        try:
+            yolo_bbox = yolo_detector.detect(page_image)
+            if yolo_bbox is not None:
+                x0, y0, x1, y1 = yolo_bbox
+                crop, bbox = _crop_notes_region_pixels(page_image, x0, y0, x1, y1)
+                detection_method = "yolo"
+                print(
+                    f"[Notes] YOLO crop: {bbox}  size: {crop.size[0]}×{crop.size[1]} px"
+                )
+            else:
+                print("[Notes] YOLO returned no detection — falling back to template")
+        except Exception as yolo_exc:
+            print(f"[Notes] YOLO detection failed ({yolo_exc}) — falling back to template")
+
+    if crop is None:
+        # Template fallback
+        if orientation == "landscape":
+            x_min, x_max, y_min, y_max = LAND_X_MIN, LAND_X_MAX, LAND_Y_MIN, LAND_Y_MAX
+        else:
+            x_min, x_max, y_min, y_max = PORT_X_MIN, PORT_X_MAX, PORT_Y_MIN, PORT_Y_MAX
+
+        print(
+            f"[Notes] Orientation: {orientation}  "
+            f"template crop=({x_min},{y_min})→({x_max},{y_max})"
+        )
+        crop, bbox = _crop_notes_region(page_image, x_min, x_max, y_min, y_max)
+        detection_method = "template"
+        print(f"[Notes] Template crop: {bbox}  size: {crop.size[0]}×{crop.size[1]} px")
 
     # ------------------------------------------------------------------
     # Step 4 — Limit crop size to protect GPU VRAM
@@ -515,7 +539,6 @@ def extract_notes_from_pdf(
 
     # ------------------------------------------------------------------
     # Step 5 — Build crop preview image (always, before OCR)
-    #           so it is available even when OCR fails.
     # ------------------------------------------------------------------
     crop_b64 = None
     if include_crop_image:
@@ -528,17 +551,13 @@ def extract_notes_from_pdf(
     # ------------------------------------------------------------------
     # Step 6 — OCR via Surya (detection + recognition, no layout model)
     #
-    # Portrait pages use a spatial filter: detected text-line bboxes
-    # whose centre-X lies in the rightmost 30 % of the crop are dropped.
-    # Those positions correspond to spec-table column headers that sit
-    # next to (or just inside) the Notes box border.  Landscape pages
-    # don't need this because the spec table is below, not to the right.
+    # Portrait pages use a spatial filter to exclude spec-table columns
+    # on the right side of the crop.  YOLO crops are already tightly
+    # bounded so we skip the filter when YOLO was used.
     # ------------------------------------------------------------------
-    # Portrait: filter out bboxes in the rightmost 20 % of the crop (spec table cols).
-    # With PORT_X_MIN=0.08 / PORT_X_MAX=0.73, the crop is 65 % of page width.
-    # Notes lines span the full Notes box (centre ≈ 40-50 % of crop) → pass.
-    # Spec-table column labels (narrow, centre ≈ 83 %+ of crop) → dropped.
-    max_col_frac = 0.80 if orientation == "portrait" else None
+    max_col_frac = None
+    if detection_method == "template" and orientation == "portrait":
+        max_col_frac = 0.80
 
     try:
         notes_text = _ocr_image_surya(crop, models, max_col_frac=max_col_frac)
@@ -548,12 +567,16 @@ def extract_notes_from_pdf(
             "notes_text": None,
             "crop_bbox": list(bbox),
             "orientation": orientation,
+            "detection_method": detection_method,
             "error": f"OCR failed: {exc}",
             "crop_image_b64": crop_b64,
         }
 
     notes_text = _clean_notes_text(notes_text)
-    print(f"[Notes] OCR done — {len(notes_text)} chars")
+    print(
+        f"[Notes] OCR done — {len(notes_text)} chars  "
+        f"(method={detection_method})"
+    )
 
     # ------------------------------------------------------------------
     # Step 7 — Return results
@@ -563,6 +586,7 @@ def extract_notes_from_pdf(
         "notes_text": notes_text,
         "crop_bbox": list(bbox),
         "orientation": orientation,
+        "detection_method": detection_method,
         "error": None,
         "crop_image_b64": crop_b64,
     }

@@ -1,4 +1,9 @@
 # syntax=docker/dockerfile:1
+
+# Global build arg — must be declared before the first FROM so it can be used to
+# select the model-bundle stage in a later `FROM models-${BUNDLE_MODELS}`.
+ARG BUNDLE_MODELS=false
+
 # ─── Stage 1: dependency builder ──────────────────────────────────────────────
 FROM python:3.11-slim AS builder
 
@@ -11,10 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir --upgrade pip
 
-# Install PyTorch separately so we can swap CPU/CUDA index via build arg.
-# Default: CPU-only (~200 MB vs ~2 GB for CUDA wheel).
+# Install PyTorch (+ torchvision, required by ultralytics/YOLO) separately so we
+# can swap CPU/CUDA index via build arg. Default: CPU-only; the GPU compose
+# overrides TORCH_INDEX_URL with a CUDA index (e.g. cu126).
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir torch --index-url "${TORCH_INDEX_URL}"
+RUN pip install --no-cache-dir torch torchvision --index-url "${TORCH_INDEX_URL}"
 
 # Install all runtime Python deps from backend/requirements.txt.
 # This covers both the FastAPI server and the Marker OCR library deps.
@@ -45,14 +51,34 @@ class OCRErrorPredictor:
 print("Stubbed surya/ocr_error/__init__.py")
 EOF
 
+# ─── Optional model bundle ────────────────────────────────────────────────────
+# BUNDLE_MODELS=true bakes the pre-downloaded Surya/Datalab model weights and the
+# Marker font into the image for fully offline operation (no model downloads at
+# the deployment site). Requires ./_bundle to exist (staged from the local cache).
+# BUNDLE_MODELS=false (default) keeps the image lean; models download on first run.
+FROM alpine:3.20 AS models-true
+WORKDIR /bundle
+COPY _bundle/ ./
+
+FROM alpine:3.20 AS models-false
+WORKDIR /bundle
+RUN mkdir -p datalab/models fonts
+
+# BUNDLE_MODELS is the global ARG declared at the top of this file.
+FROM models-${BUNDLE_MODELS} AS model-stage
+
 # ─── Stage 2: lean runtime image ──────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# Runtime shared-library deps only (no compiler toolchain)
+# Runtime shared libraries + a C toolchain. On GPU, Torch/Triton JIT-compiles
+# CUDA kernel launchers and needs a C compiler AND the libc dev headers
+# (gcc alone hits "fatal error: stdlib.h: No such file or directory").
+# libc6-dev provides the standard C headers. Harmless (unused) on CPU-only hosts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglib2.0-0 libsm6 libxext6 \
+        gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for security
@@ -66,18 +92,33 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application source
 COPY backend/ ./backend/
 
-# Pre-create all writable directories so Docker named volumes inherit
-# app:app ownership on first mount instead of defaulting to root.
+# YOLO Notes model (small; always present in build context)
+COPY --chown=app:app models/ ./models/
+
+# Bundled (or empty) Surya/Datalab model weights + Marker font.
+# --chown at copy time avoids a costly recursive chown layer for the ~3 GB tree.
+COPY --chown=app:app --from=model-stage /bundle/datalab/models /models/datalab
+COPY --chown=app:app --from=model-stage /bundle/fonts          /models/fonts
+
+# Pre-create writable dirs; chown only the small trees (models are already owned
+# via --chown above, so we must NOT recursively chown the multi-GB /models tree).
 RUN mkdir -p \
         /app/backend/uploads \
         /home/app/.cache/datalab \
-        /models/fonts \
         /models/torch \
-    && chown -R app:app /app /home/app /models
+    && chown -R app:app /app /home/app \
+    && chown app:app /models /models/torch
 
-# Hugging Face & Torch model cache → mount a persistent volume here
+# Model caches & paths. MODEL_CACHE_DIR points Surya at the baked weights;
+# YOLO_MODEL_PATH / FONT_* point at the bundled files. Offline flags are set by
+# the deployment compose (docker-compose.company.yml), not here, so the lean
+# build can still download on first run.
 ENV HF_HOME=/models \
     TORCH_HOME=/models/torch \
+    MODEL_CACHE_DIR=/models/datalab \
+    FONT_DIR=/models/fonts \
+    FONT_PATH=/models/fonts/GoNotoCurrent-Regular.ttf \
+    YOLO_MODEL_PATH=/app/models/notes_best.pt \
     HOST=0.0.0.0 \
     PORT=8001
 

@@ -4,14 +4,11 @@ import ProcessingStatus from "./components/ProcessingStatus";
 import BatchResults from "./components/BatchResults";
 import NotesResults from "./components/NotesResults";
 import QualityReview from "./components/QualityReview";
+import ModeToggle from "./components/ModeToggle";
+import LicensePage from "./components/LicensePage";
+import OperationWarning from "./components/OperationWarning";
 import { uploadBatch, extractNotesBatch, checkQualityBatch } from "./services/api";
 import { useT } from "./i18n/index.jsx";
-
-// Mode icon map (labels come from translations)
-const MODE_IDS = [
-  { id: "ocr",   icon: "description" },
-  { id: "notes", icon: "sticky_note_2" },
-];
 
 // Default quality thresholds (must match backend/quality_checker.py)
 const DEFAULT_THRESHOLDS = {
@@ -67,6 +64,10 @@ function App() {
   };
 
   const [mode, setMode]                   = useState("ocr");
+  const [activePage, setActivePage]       = useState(null); // null | "license"
+  const [showOpWarning, setShowOpWarning] = useState(
+    () => localStorage.getItem("opsWarnAck") !== "1",
+  );
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isQualityChecking, setIsQualityChecking] = useState(false);
   const [qualityData, setQualityData]     = useState(null);
@@ -178,25 +179,6 @@ function App() {
     setIsProcessing(false);
   };
 
-  // ── Sidebar nav item ─────────────────────────────────────────────────────────
-  const NavItem = ({ m }) => {
-    const label  = m.id === "ocr" ? t.modeOcr : t.modeNotes;
-    const active = mode === m.id && !isProcessing && !results;
-    return (
-      <button
-        onClick={() => handleModeChange(m.id)}
-        className={`w-full flex items-center gap-3 rounded-full mx-2 px-4 py-3 text-sm transition-all duration-200 ${
-          active
-            ? "bg-primary dark:bg-[#dcc497] text-on-primary dark:text-[#3d2e0e] font-bold scale-95 shadow-md"
-            : "text-on-surface-variant dark:text-[#cfc5b7] hover:bg-surface-container-high dark:hover:bg-[#2a2a2a]"
-        }`}
-      >
-        <span className="material-symbols-outlined text-[20px]">{m.icon}</span>
-        <span className="font-label">{label}</span>
-      </button>
-    );
-  };
-
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="bg-background dark:bg-[#131313] text-on-background dark:text-[#e5e2e1] font-body min-h-screen flex relative">
@@ -215,11 +197,9 @@ function App() {
           </p>
         </div>
 
-        {/* Mode navigation */}
+        {/* Mode navigation (sliding toggle) */}
         <nav className="flex-1 flex flex-col gap-1 px-2">
-          {MODE_IDS.map((m) => (
-            <NavItem key={m.id} m={m} />
-          ))}
+          <ModeToggle mode={mode} onChange={handleModeChange} className="mx-2 mb-3" />
 
           {isQualityChecking && (
             <div className="flex items-center gap-3 rounded-full mx-2 px-4 py-3 bg-primary/10 dark:bg-[#dcc497]/10 text-primary dark:text-[#dcc497] text-sm font-bold">
@@ -272,6 +252,21 @@ function App() {
             <span className="material-symbols-outlined text-[18px]">help_outline</span>
             <span className="font-label">{t.support}</span>
           </a>
+          <button
+            onClick={() => setActivePage("license")}
+            className={`w-full flex items-center gap-3 rounded-full mx-2 px-4 py-2.5 text-sm transition-colors ${
+              activePage === "license"
+                ? "bg-primary/10 dark:bg-[#dcc497]/10 text-primary dark:text-[#dcc497] font-semibold"
+                : "text-on-surface-variant dark:text-[#cfc5b7] hover:bg-surface-container-high dark:hover:bg-[#2a2a2a]"
+            }`}
+          >
+            <span className="material-symbols-outlined text-[18px]">gavel</span>
+            <span className="font-label">{t.licenseNav}</span>
+          </button>
+          {/* Attribution — Marker (Datalab) is GPL-3.0 / model weights non-commercial */}
+          <p className="px-4 mt-3 text-[10px] leading-snug text-on-surface-variant dark:text-[#cfc5b7] opacity-50 font-label">
+            {t.aboutEngineBody}
+          </p>
         </div>
       </aside>
 
@@ -293,6 +288,15 @@ function App() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* License & fee notice */}
+            <button
+              onClick={() => setActivePage("license")}
+              title={t.licenseNav}
+              aria-label={t.licenseNav}
+              className="p-2 text-on-surface-variant dark:text-[#cfc5b7] hover:bg-surface-container-high dark:hover:bg-[#2a2a2a] rounded-full transition-all"
+            >
+              <span className="material-symbols-outlined text-[22px]">gavel</span>
+            </button>
             {/* Language toggle */}
             <button
               onClick={toggleLang}
@@ -326,6 +330,10 @@ function App() {
 
         {/* Main scrollable content */}
         <main className="flex-1 overflow-y-auto custom-scrollbar">
+          {activePage === "license" ? (
+            <LicensePage onBack={() => setActivePage(null)} />
+          ) : (
+          <>
           {/* Error banner */}
           {error && (
             <div className="mx-6 md:mx-10 mt-6 p-4 bg-error-container dark:bg-[#93000a]/30 border border-error/30 rounded-2xl">
@@ -395,33 +403,14 @@ function App() {
           {!isProcessing && results && mode === "notes" && (
             <NotesResults results={results} onNewUpload={handleNewUpload} />
           )}
+          </>
+          )}
         </main>
       </div>
 
       {/* ── Mobile bottom nav ───────────────────────────────────────────────────── */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface-container-low dark:bg-[#1c1b1b] py-3 px-6 flex justify-around items-center z-50 rounded-t-3xl border-t border-outline-variant dark:border-[#4c463c] shadow-2xl">
-        {MODE_IDS.map((m) => {
-          const label = m.id === "ocr" ? t.modeOcr : t.modeNotes;
-          return (
-            <button
-              key={m.id}
-              onClick={() => handleModeChange(m.id)}
-              className={`flex flex-col items-center gap-1 transition-colors ${
-                mode === m.id
-                  ? "text-primary dark:text-[#dcc497]"
-                  : "text-on-surface-variant dark:text-[#cfc5b7]"
-              }`}
-            >
-              <span
-                className="material-symbols-outlined"
-                style={mode === m.id ? { fontVariationSettings: "'FILL' 1" } : {}}
-              >
-                {m.icon}
-              </span>
-              <span className="text-[10px] font-label">{label}</span>
-            </button>
-          );
-        })}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface-container-low dark:bg-[#1c1b1b] py-3 px-6 flex items-center gap-3 z-50 rounded-t-3xl border-t border-outline-variant dark:border-[#4c463c] shadow-2xl">
+        <ModeToggle mode={mode} onChange={handleModeChange} className="flex-1" />
         {results && (
           <button
             onClick={handleNewUpload}
@@ -432,6 +421,20 @@ function App() {
           </button>
         )}
       </nav>
+
+      {/* ── System licensing warning (first use) ────────────────────────────────── */}
+      <OperationWarning
+        open={showOpWarning}
+        onAck={() => {
+          localStorage.setItem("opsWarnAck", "1");
+          setShowOpWarning(false);
+        }}
+        onViewLicense={() => {
+          localStorage.setItem("opsWarnAck", "1");
+          setShowOpWarning(false);
+          setActivePage("license");
+        }}
+      />
     </div>
   );
 }

@@ -4,6 +4,7 @@ Provides CAD_OCR-compatible API interface
 """
 
 import os
+import uuid
 from typing import List
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -27,11 +28,19 @@ from marker.models import create_model_dict  # noqa: E402
 from marker.output import text_from_rendered  # noqa: E402
 
 from quality_checker import check_document_quality  # noqa: E402
+from yolo_detector import YOLONotesDetector  # noqa: E402
 
 # Configuration
-API_TITLE = "PDF/Image OCR Service (Marker)"
-API_VERSION = "1.1.0"
-API_DESCRIPTION = "PDF and Image to Markdown conversion using Marker"
+API_TITLE = "PDF/Image OCR Service (Marker + YOLO Notes)"
+API_VERSION = "1.2.0"
+API_DESCRIPTION = (
+    "PDF and Image to Markdown conversion using Marker, "
+    "with YOLO-based Notes region detection"
+)
+
+# Default YOLO Notes model path — override via env var YOLO_MODEL_PATH.
+# Lives at <project_root>/models/notes_best.pt (backend/ is one level down).
+DEFAULT_YOLO_MODEL = Path(__file__).parent.parent / "models" / "notes_best.pt"
 
 # CORS Origins - read from env or use defaults
 CORS_ORIGINS_ENV = os.getenv("CORS_ORIGINS", "")
@@ -77,8 +86,9 @@ ALLOWED_MIMES = {
     "image/tiff",
 }
 
-# Maximum number of files allowed in a single batch request
-MAX_BATCH_FILES = 50
+# Maximum number of files allowed in a single batch request (0 = unlimited).
+# Bounded by default to prevent unbounded work per request; override via env.
+MAX_BATCH_FILES = int(os.getenv("MAX_BATCH_FILES", "50"))
 
 # Global state
 app_data = {}
@@ -97,14 +107,21 @@ class OCRResponse(BaseModel):
     contrast: float = 0.0
 
 
-def sanitize_filename(filename: str) -> str:
-    """Strip any directory components to prevent path traversal."""
-    return Path(filename).name
-
-
 def get_file_extension(filename: str) -> str:
     """Get lowercase file extension"""
     return Path(filename).suffix.lower()
+
+
+def unique_upload_path(filename: str) -> Path:
+    """
+    Build a collision-free on-disk path for an upload.
+
+    Uses a random UUID as the on-disk name (keeping only the validated
+    extension) so concurrent requests uploading files with the same name
+    cannot overwrite each other's data or delete a file mid-processing.
+    The user's original filename is still returned to the client for display.
+    """
+    return UPLOAD_DIR / f"{uuid.uuid4().hex}{get_file_extension(filename)}"
 
 
 def is_allowed_file(filename: str) -> bool:
@@ -165,12 +182,31 @@ async def lifespan(app: FastAPI):
         print(f"⚠ Warning: Failed to load models: {e}")
         print("Models will be loaded on first request\n")
 
+    # Load YOLO Notes detector (optional — degrade gracefully to template crop)
+    yolo_model_path = Path(os.getenv("YOLO_MODEL_PATH", str(DEFAULT_YOLO_MODEL)))
+    detector = YOLONotesDetector()
+    if yolo_model_path.exists():
+        try:
+            detector.load(yolo_model_path)
+            print(f"✓ YOLO Notes detector loaded: {yolo_model_path.name}\n")
+        except Exception as yolo_err:
+            print(f"⚠ Warning: Failed to load YOLO model: {yolo_err}")
+            print("  Notes extraction will use template-based cropping.\n")
+    else:
+        print(
+            f"⚠ YOLO model not found at {yolo_model_path}\n"
+            "  Notes extraction will use template-based cropping "
+            "(set YOLO_MODEL_PATH to enable YOLO detection).\n"
+        )
+    app_data["yolo_detector"] = detector
+
     yield
 
     # Cleanup
     print("\n🛑 Shutting down...")
     if "models" in app_data:
         del app_data["models"]
+    app_data.pop("yolo_detector", None)
     if device == "cuda":
         torch.cuda.empty_cache()
 
@@ -206,15 +242,18 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.get("/")
 async def root():
+    detector: YOLONotesDetector = app_data.get("yolo_detector")
     return {
         "name": API_TITLE,
         "version": API_VERSION,
         "supported_formats": list(ALLOWED_EXTENSIONS),
+        "yolo_notes_detector": bool(detector and detector.is_loaded),
         "endpoints": {
             "upload": "/api/upload",
             "upload_batch": "/api/upload-batch",
             "extract_notes": "/api/extract-notes",
             "extract_notes_batch": "/api/extract-notes-batch",
+            "yolo_status": "/api/yolo-status",
             "health": "/api/health",
         },
     }
@@ -222,11 +261,31 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
+    detector: YOLONotesDetector = app_data.get("yolo_detector")
     return {
         "status": "healthy",
         "model_loaded": "models" in app_data,
         "device": app_data.get("device", "unknown"),
+        "yolo_notes_detector": bool(detector and detector.is_loaded),
         "supported_formats": list(ALLOWED_EXTENSIONS),
+    }
+
+
+@app.get("/api/yolo-status")
+async def yolo_status():
+    """Report whether the YOLO Notes detector is active (else template fallback)."""
+    detector: YOLONotesDetector = app_data.get("yolo_detector")
+    yolo_model_path = Path(os.getenv("YOLO_MODEL_PATH", str(DEFAULT_YOLO_MODEL)))
+    loaded = bool(detector and detector.is_loaded)
+    return {
+        "loaded": loaded,
+        "model_path": str(yolo_model_path),
+        "model_exists": yolo_model_path.exists(),
+        "message": (
+            "YOLO model active — Notes region detected automatically."
+            if loaded
+            else "YOLO model not loaded — using template-based fallback."
+        ),
     }
 
 
@@ -262,8 +321,7 @@ async def upload_and_process_file(
             )
 
         # Sanitize filename to prevent path traversal
-        safe_filename = sanitize_filename(file.filename)
-        file_path = UPLOAD_DIR / safe_filename
+        file_path = unique_upload_path(file.filename)
         with open(file_path, "wb") as f:
             f.write(content)
 
@@ -330,7 +388,7 @@ async def check_quality_batch(
     min_contrast:    float = Query(15.0,  description="Minimum std-dev of pixel values (contrast)"),
 ):
     """Run pre-OCR quality checks on multiple files without performing OCR."""
-    if len(files) > MAX_BATCH_FILES:
+    if MAX_BATCH_FILES > 0 and len(files) > MAX_BATCH_FILES:
         raise HTTPException(
             status_code=400,
             detail=f"Too many files. Maximum {MAX_BATCH_FILES} files per request.",
@@ -380,8 +438,7 @@ async def check_quality_batch(
                 continue
 
             file_type = get_file_type(file.filename)
-            safe_filename = sanitize_filename(file.filename)
-            file_path = UPLOAD_DIR / safe_filename
+            file_path = unique_upload_path(file.filename)
             with open(file_path, "wb") as f:
                 f.write(content)
 
@@ -431,7 +488,7 @@ async def upload_and_process_batch(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    if len(files) > MAX_BATCH_FILES:
+    if MAX_BATCH_FILES > 0 and len(files) > MAX_BATCH_FILES:
         raise HTTPException(
             status_code=400,
             detail=f"Too many files. Maximum {MAX_BATCH_FILES} files per request.",
@@ -488,8 +545,7 @@ async def upload_and_process_batch(
                 continue
 
             file_type = get_file_type(file.filename)
-            safe_filename = sanitize_filename(file.filename)
-            file_path = UPLOAD_DIR / safe_filename
+            file_path = unique_upload_path(file.filename)
             with open(file_path, "wb") as f:
                 f.write(content)
 
@@ -632,8 +688,7 @@ async def extract_notes_single(
                 status_code=400, detail="File content does not match a supported type"
             )
 
-        safe_filename = sanitize_filename(file.filename)
-        file_path = UPLOAD_DIR / safe_filename
+        file_path = unique_upload_path(file.filename)
         with open(file_path, "wb") as f:
             f.write(content)
 
@@ -649,6 +704,7 @@ async def extract_notes_single(
             str(file_path),
             app_data["models"],
             include_crop_image=include_image,
+            yolo_detector=app_data.get("yolo_detector"),
         )
 
         processing_time = time.time() - start_time
@@ -693,7 +749,7 @@ async def extract_notes_batch(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    if len(files) > MAX_BATCH_FILES:
+    if MAX_BATCH_FILES > 0 and len(files) > MAX_BATCH_FILES:
         raise HTTPException(
             status_code=400,
             detail=f"Too many files. Maximum {MAX_BATCH_FILES} files per request.",
@@ -764,8 +820,7 @@ async def extract_notes_batch(
                 )
                 continue
 
-            safe_filename = sanitize_filename(file.filename)
-            file_path = UPLOAD_DIR / safe_filename
+            file_path = unique_upload_path(file.filename)
             with open(file_path, "wb") as f:
                 f.write(content)
 
@@ -776,6 +831,7 @@ async def extract_notes_batch(
                     str(fpath),
                     app_data["models"],
                     include_crop_image=include_image,
+                    yolo_detector=app_data.get("yolo_detector"),
                 )
 
             with ThreadPoolExecutor(max_workers=1) as executor:

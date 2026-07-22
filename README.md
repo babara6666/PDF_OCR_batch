@@ -70,6 +70,66 @@ Browser → nginx :80
 
 ---
 
+## 單一 Image 部署（All-in-one）
+
+前端靜態檔與後端打包在同一個 image 中，適合無法使用 docker-compose 的遠端環境。
+
+### 建置
+
+```bash
+# CPU 版
+docker build -f Dockerfile.allinone -t printlens:latest .
+
+# GPU 版（CUDA 12.6）
+docker build -f Dockerfile.allinone --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126 -t printlens:gpu .
+
+# GPU 版（CUDA 12.8）
+docker build -f Dockerfile.allinone --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 -t printlens:gpu .
+```
+
+### 啟動
+
+```bash
+# GPU 版，對外 port 9000
+docker run -d -p 9000:80 -v model_cache:/models --gpus all --name printlens printlens:gpu
+
+# CPU 版
+docker run -d -p 9000:80 -v model_cache:/models --name printlens printlens:latest
+```
+
+開啟瀏覽器訪問 **http://localhost:9000**（或指定的 port）
+
+### 常用指令
+
+```bash
+# 查看 log（含模型載入與 nginx 狀態）
+docker logs -f printlens
+
+# 停止
+docker stop printlens
+
+# 再次啟動
+docker start printlens
+
+# 刪除容器（保留 image）
+docker rm -f printlens
+
+# 刪除容器與 image
+docker rm -f printlens && docker rmi printlens:gpu
+```
+
+### 架構說明
+
+```
+Browser → nginx :80 (對外 port 可自訂)
+            ├── /api/*  → uvicorn 127.0.0.1:8001 (容器內部)
+            └── /*      → React SPA 靜態檔 (/usr/share/nginx/html)
+```
+
+nginx 與 uvicorn 由 supervisor 在同一容器內管理。
+
+---
+
 ## 本機開發（不使用 Docker）
 
 ### 系統需求

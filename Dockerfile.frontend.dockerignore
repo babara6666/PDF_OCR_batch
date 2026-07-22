@@ -1,0 +1,33 @@
+# Per-Dockerfile ignore for the frontend build (BuildKit uses this in place of
+# .dockerignore when building Dockerfile.frontend). The frontend only needs
+# frontend/ + nginx.conf, so keep the multi-GB model bundle and backend out of
+# its build context entirely.
+_bundle/
+models/
+marker/
+backend/
+data/
+static/
+deploy/
+printlens-deploy/
+*.pdf
+
+# Node build artifacts
+frontend/node_modules/
+frontend/dist/
+
+# Git & IDE & secrets
+.git/
+.gitignore
+.vscode/
+.claude/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+
+# Docs
+*.md
+!README.md
+LICENSE
+MODEL_LICENSE

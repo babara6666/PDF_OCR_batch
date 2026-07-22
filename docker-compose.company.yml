@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Company GPU deployment — self-contained image with baked-in ML models.
+#
+# The backend image bakes:
+#   • Surya / Datalab OCR model weights (detection, recognition, layout, table)
+#   • Marker font (GoNotoCurrent)
+#   • YOLO Notes detection model (notes_best.pt)
+# and runs fully OFFLINE — no model downloads at the deployment site.
+#
+# Prerequisites on the GPU host:
+#   • Docker + NVIDIA Container Toolkit
+#     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+# Build (staged ./_bundle must be present):
+#   docker compose -f docker-compose.company.yml build
+# Run:
+#   docker compose -f docker-compose.company.yml up -d
+# Open:  http://<host>:8080
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args:
+        # CUDA 12.6 wheels (compatible with driver 12.6+/12.8). Adjust if needed.
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu126
+        # Bake the pre-downloaded models + font into the image (needs ./_bundle).
+        BUNDLE_MODELS: "true"
+    image: printlens-backend:gpu-bundled
+    container_name: printlens-backend
+    restart: unless-stopped
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8001"
+      CORS_ORIGINS: "http://localhost,http://localhost:80,http://127.0.0.1"
+      # Models are baked in → stay fully offline, never reach the network.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      # Security hardening (audit finding #2): bound the per-request batch size.
+      MAX_BATCH_FILES: "50"
+      # Writable config dir for Ultralytics (avoids a startup warning).
+      YOLO_CONFIG_DIR: "/tmp/Ultralytics"
+      NVIDIA_VISIBLE_DEVICES: "all"
+    volumes:
+      # Only ephemeral uploads need a volume; model weights live inside the image.
+      - upload_tmp:/app/backend/uploads
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - app-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/health')"
+      interval: 30s
+      timeout: 10s
+      start_period: 180s   # models are local → no multi-GB first-run download
+      retries: 5
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: /
+    image: printlens-frontend:latest
+    container_name: printlens-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app-net
+
+volumes:
+  upload_tmp:
+    driver: local
+
+networks:
+  app-net:
+    driver: bridge

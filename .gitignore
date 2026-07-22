@@ -241,3 +241,11 @@ credentials/
 *.pfx
 id_rsa
 id_ed25519
+
+# Staged model bundle for offline Docker build (3.3GB — never commit)
+_bundle/
+# YOLO notes model (binary weight; bundled into image, not tracked)
+models/*.pt
+
+# Exported Docker images bundle (large — never commit)
+printlens-images.tar.gz

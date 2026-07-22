@@ -16,7 +16,7 @@ rapidfuzz>=3.8.1
 # surya-ocr 0.17.x requires transformers 4.x — transformers 5.0 removed APIs surya depends on.
 # pyproject.toml already declares "^4.45.2" (<5.0), so we enforce the same here.
 transformers>=4.45.2,<5.0.0
-surya-ocr>=0.17.1
+surya-ocr==0.17.1
 regex>=2024.4.28
 pdftext~=0.6.3
 markdownify>=1.1.0
@@ -27,3 +27,7 @@ google-genai>=1.0.0
 anthropic>=0.46.0
 scikit-learn>=1.6.1
 openai>=1.65.2
+
+# YOLO Notes region detection (AGPL-3.0 — commercial use requires an
+# Ultralytics Enterprise License). Pulls in torchvision.
+ultralytics>=8.3.0
