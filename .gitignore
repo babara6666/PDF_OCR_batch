@@ -249,3 +249,5 @@ models/*.pt
 
 # Exported Docker images bundle (large — never commit)
 printlens-images.tar.gz
+# Staged deploy bundle with model weights (3.3GB — never commit)
+printlens-deploy/

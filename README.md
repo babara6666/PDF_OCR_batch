@@ -184,6 +184,14 @@ PDF_OCR_FS/
 │   ├── main.py               # FastAPI 主程式
 │   ├── quality_checker.py    # OCR 前品質檢查
 │   ├── notes_extractor.py    # 工程圖 Notes 區段提取
+│   ├── bench_fastdoc.py      # 快速路徑 vs Marker 的量測工具
+│   ├── fastdoc/              # 免模型快速路徑（anydoc 架構移植）
+│   │   ├── detect.py         #   1. 依內容判斷格式
+│   │   ├── model.py          #   2. 共用 document model
+│   │   ├── serialize.py      #   3. 單一 GFM serializer
+│   │   ├── router.py         #   分流：走快速路徑還是 OCR
+│   │   └── parsers/          #   pdf.py / office.py
+│   ├── tests/                # pytest 測試與 PDF fixture 產生器
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
@@ -197,6 +205,67 @@ PDF_OCR_FS/
 
 ---
 
+## 快速路徑 fastdoc（免模型、免 GPU）
+
+`backend/fastdoc/` 是一條放在 Marker 前面的分流器，架構移植自
+[firecrawl/anydoc](https://github.com/firecrawl/anydoc) 的三段式設計：
+
+```
+1. detect      依檔案內容（magic bytes / ZIP mimetype / OLE stream）判型，不信副檔名
+2. parse       每種格式一個 parser，全部產出同一份 document model
+3. serialize   單一 GFM serializer 負責所有格式的輸出與跳脫
+```
+
+**anydoc 本身完全不做 OCR**，所以這不是 Marker 的替代品，而是它的前置分流：
+
+| 輸入 | 走哪條路 |
+|------|----------|
+| 自帶文字層的電子檔 PDF（CAD/Office 匯出） | fastdoc，毫秒級，不碰 GPU |
+| 掃描件 PDF、所有圖片格式 | Marker OCR，行為完全不變 |
+| docx / xlsx / pptx / csv / txt | fastdoc（原本不支援的新格式） |
+
+判斷依據是文字層探測（每頁字元數、有文字的頁面比例、字元對應是否損毀），
+只讀文字物件、不算繪製頁面，成本約數毫秒。
+
+### 開啟自動分流
+
+```bash
+# .env
+FASTDOC_ROUTING=1
+```
+
+開啟後 `/api/upload` 與 `/api/upload-batch` 會先試快速路徑，失敗才回落 OCR。
+回應多一個 `engine` 欄位（`fastdoc` 或 `marker`）標示實際走哪條路。
+**掃描件的處理結果不受影響**——快速路徑只會少做工，不會降低輸出品質。
+
+### 先量測再決定
+
+在自己的檔案上跑，看快速路徑對你的語料有沒有價值：
+
+```bash
+cd backend
+
+# 1. 只做分流統計，不載入任何模型（先跑這個）
+python bench_fastdoc.py triage D:\your\batch\folder
+
+# 2. 只跑快速路徑，輸出 markdown
+python bench_fastdoc.py fast D:\your\batch\folder --out md_out
+
+# 3. 兩條路都跑，比時間、字數與文字一致度（會載入 Marker 模型，建議在 GPU 環境跑）
+python bench_fastdoc.py compare D:\your\batch\folder --limit 10 --out md_out --json result.json
+```
+
+`triage` 的輸出會直接告訴你有多少比例的檔案可以跳過 OCR。如果是 0%，
+代表你的語料全是掃描件，這條路對你沒有價值，可以直接不開。
+
+### 測試
+
+```bash
+python -m pytest backend/tests/test_fastdoc.py -q
+```
+
+---
+
 ## API 端點
 
 | 端點 | 方法 | 說明 |
@@ -206,6 +275,8 @@ PDF_OCR_FS/
 | `/api/upload` | POST | 單一檔案 OCR 轉換 |
 | `/api/upload-batch` | POST | 批次 OCR 轉換（最多 50 檔） |
 | `/api/check-quality-batch` | POST | 批次品質預檢（不執行 OCR） |
+| `/api/convert-fast` | POST | 快速路徑轉換（免模型；掃描件回 422） |
+| `/api/triage-batch` | POST | 批次分流：判斷每個檔要走 OCR 還是快速路徑 |
 | `/api/extract-notes` | POST | 單一工程圖 Notes 區段提取 |
 | `/api/extract-notes-batch` | POST | 批次工程圖 Notes 區段提取 |
 

@@ -30,6 +30,10 @@ from marker.output import text_from_rendered  # noqa: E402
 from quality_checker import check_document_quality  # noqa: E402
 from yolo_detector import YOLONotesDetector  # noqa: E402
 
+import fastdoc  # noqa: E402
+from fastdoc.detect import detect_bytes  # noqa: E402
+from fastdoc.router import SUPPORTED as FASTDOC_FORMATS  # noqa: E402
+
 # Configuration
 API_TITLE = "PDF/Image OCR Service (Marker + YOLO Notes)"
 API_VERSION = "1.2.0"
@@ -86,6 +90,15 @@ ALLOWED_MIMES = {
     "image/tiff",
 }
 
+# Fast path (fastdoc): PDFs that already carry a text layer, and structured
+# office formats, convert with no model at all. Marker still handles every
+# scan. Off by default so existing behaviour is unchanged until you opt in.
+FASTDOC_ROUTING = os.getenv("FASTDOC_ROUTING", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+# Extensions the fast-path endpoints accept. Wider than ALLOWED_EXTENSIONS
+# because these formats need no OCR — but the real check is on content.
+FASTDOC_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".pptx", ".csv", ".txt"}
+
 # Maximum number of files allowed in a single batch request (0 = unlimited).
 # Bounded by default to prevent unbounded work per request; override via env.
 MAX_BATCH_FILES = int(os.getenv("MAX_BATCH_FILES", "50"))
@@ -105,6 +118,8 @@ class OCRResponse(BaseModel):
     blur_score: float = 0.0
     brightness: float = 0.0
     contrast: float = 0.0
+    # Which pipeline produced the markdown: "marker" (OCR) or "fastdoc".
+    engine: str = "marker"
 
 
 def get_file_extension(filename: str) -> str:
@@ -143,6 +158,30 @@ def get_file_type(filename: str) -> str:
     if ext == ".pdf":
         return "pdf"
     return "image"
+
+
+def try_fast_path(file_path: Path):
+    """Convert without a model, or return None to fall through to Marker.
+
+    Returns a `fastdoc.Result` only when the file genuinely carried its own
+    text. Scans, images, and anything the fast path chokes on return None so
+    the OCR pipeline stays the default — this can only save work, never
+    silently degrade output.
+    """
+    if not FASTDOC_ROUTING:
+        return None
+    try:
+        result = fastdoc.convert(str(file_path))
+    except Exception as exc:
+        print(f"  ⚠ Fast path error, falling back to OCR: {exc}")
+        return None
+    if not result.ok:
+        print(f"  → OCR required: {result.reason or result.error}")
+        return None
+    print(
+        f"  ⚡ Fast path [{result.format}] in {result.elapsed_ms:.0f}ms — no GPU used"
+    )
+    return result
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -247,10 +286,14 @@ async def root():
         "name": API_TITLE,
         "version": API_VERSION,
         "supported_formats": list(ALLOWED_EXTENSIONS),
+        "fastdoc_formats": sorted(FASTDOC_EXTENSIONS),
+        "fastdoc_routing": FASTDOC_ROUTING,
         "yolo_notes_detector": bool(detector and detector.is_loaded),
         "endpoints": {
             "upload": "/api/upload",
             "upload_batch": "/api/upload-batch",
+            "convert_fast": "/api/convert-fast",
+            "triage_batch": "/api/triage-batch",
             "extract_notes": "/api/extract-notes",
             "extract_notes_batch": "/api/extract-notes-batch",
             "yolo_status": "/api/yolo-status",
@@ -267,6 +310,7 @@ async def health_check():
         "model_loaded": "models" in app_data,
         "device": app_data.get("device", "unknown"),
         "yolo_notes_detector": bool(detector and detector.is_loaded),
+        "fastdoc_routing": FASTDOC_ROUTING,
         "supported_formats": list(ALLOWED_EXTENSIONS),
     }
 
@@ -330,6 +374,22 @@ async def upload_and_process_file(
             f"Processing [{file_type.upper()}]: {file.filename} ({file_size / 1024:.1f} KB)"
         )
         print(f"{'=' * 60}")
+
+        # Fast path first: a PDF with its own text layer needs neither the
+        # image quality check (there is no image to score) nor the GPU.
+        fast = try_fast_path(file_path)
+        if fast is not None:
+            processing_time = time.time() - start_time
+            print(f"✓ Processing complete in {processing_time:.2f}s (fastdoc)\n")
+            return OCRResponse(
+                success=True,
+                filename=file.filename,
+                markdown_content=fast.markdown,
+                file_size=file_size,
+                processing_time=processing_time,
+                file_type=file_type,
+                engine="fastdoc",
+            )
 
         # Pre-OCR quality check
         quality = check_document_quality(str(file_path), file_type)
@@ -553,6 +613,26 @@ async def upload_and_process_batch(
                 f"\n[{idx}/{total}] Processing [{file_type.upper()}]: {file.filename} ({file_size / 1024:.1f} KB)"
             )
 
+            # Fast path first — skips both the quality check and the GPU for
+            # any file that already carries its own text.
+            fast = try_fast_path(file_path)
+            if fast is not None:
+                processing_time = time.time() - start_time
+                print(f"  ⚡ Done in {processing_time:.2f}s (fastdoc)")
+                results.append(
+                    {
+                        "success": True,
+                        "filename": file.filename,
+                        "markdown_content": fast.markdown,
+                        "file_size": file_size,
+                        "processing_time": processing_time,
+                        "file_type": file_type,
+                        "error": "",
+                        "engine": "fastdoc",
+                    }
+                )
+                continue
+
             # Pre-OCR quality check
             quality = check_document_quality(str(file_path), file_type)
             print(f"  Quality — blur={quality['blur_score']} brightness={quality['brightness']} contrast={quality['contrast']}")
@@ -614,6 +694,7 @@ async def upload_and_process_batch(
                     "processing_time": processing_time,
                     "file_type": file_type,
                     "error": "",
+                    "engine": "marker",
                     "blur_score": quality["blur_score"],
                     "brightness": quality["brightness"],
                     "contrast": quality["contrast"],
@@ -643,6 +724,159 @@ async def upload_and_process_batch(
     succeeded = sum(1 for r in results if r["success"])
     print(f"\n📦 Batch complete: {succeeded}/{total} succeeded")
     return {"results": results, "total": total, "succeeded": succeeded}
+
+
+# ---------------------------------------------------------------------------
+# Fast path endpoints (fastdoc — no model, no GPU)
+# ---------------------------------------------------------------------------
+
+
+async def _stage_fastdoc_upload(file: UploadFile) -> tuple[Path, str, int]:
+    """Validate and store an upload for the fast path.
+
+    Raises HTTPException on rejection. Content decides the format — the
+    extension only gates which files are worth reading at all.
+    """
+    if get_file_extension(file.filename) not in FASTDOC_EXTENSIONS:
+        allowed = ", ".join(sorted(FASTDOC_EXTENSIONS))
+        raise HTTPException(
+            status_code=415, detail=f"Fast path supports: {allowed}"
+        )
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large (max 50MB)")
+
+    detected = detect_bytes(content)
+    if detected not in FASTDOC_FORMATS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"File content is '{detected}', which the fast path cannot convert",
+        )
+
+    path = unique_upload_path(file.filename)
+    with open(path, "wb") as handle:
+        handle.write(content)
+    return path, detected, len(content)
+
+
+@app.post("/api/convert-fast")
+async def convert_fast(
+    file: UploadFile = File(..., description="Document with an existing text layer"),
+    page_breaks: bool = Query(False, description="Emit <!-- page N --> markers"),
+):
+    """Convert a document to Markdown without OCR.
+
+    Returns 422 when the file turns out to be a scan — send it to
+    /api/upload instead, which runs the full Marker pipeline.
+    """
+    file_path = None
+    try:
+        file_path, detected, file_size = await _stage_fastdoc_upload(file)
+        result = fastdoc.convert(str(file_path), page_breaks=page_breaks)
+
+        if not result.ok:
+            raise HTTPException(
+                status_code=422 if result.needs_ocr else 400,
+                detail=result.reason or result.error or "Conversion failed",
+            )
+
+        return {
+            "success": True,
+            "filename": file.filename,
+            "markdown_content": result.markdown,
+            "file_size": file_size,
+            "processing_time": result.elapsed_ms / 1000.0,
+            "file_type": detected,
+            "engine": "fastdoc",
+            "probe": result.probe,
+            "warnings": result.warnings,
+            "error": "",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"✗ Fast conversion error: {exc}")
+        raise HTTPException(status_code=500, detail="Conversion failed")
+    finally:
+        if file_path and file_path.exists():
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+
+
+@app.post("/api/triage-batch")
+async def triage_batch(
+    files: List[UploadFile] = File(..., description="Files to route before any OCR"),
+):
+    """Report which files need OCR and which can take the fast path.
+
+    Reads text objects only — never renders a page and never loads a model —
+    so a whole batch can be routed before any GPU time is committed.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if MAX_BATCH_FILES > 0 and len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files. Maximum {MAX_BATCH_FILES} files per request.",
+        )
+
+    results = []
+    for file in files:
+        file_path = None
+        try:
+            content = await file.read()
+            if len(content) > MAX_FILE_SIZE:
+                results.append(
+                    {
+                        "filename": file.filename,
+                        "route": "error",
+                        "error": "File too large (max 50MB)",
+                    }
+                )
+                continue
+
+            file_path = unique_upload_path(file.filename)
+            with open(file_path, "wb") as handle:
+                handle.write(content)
+
+            verdict = fastdoc.triage(str(file_path))
+            if verdict.needs_ocr:
+                route = "ocr"
+            elif verdict.ok:
+                route = "fast"
+            else:
+                route = "unsupported"
+
+            results.append(
+                {
+                    "filename": file.filename,
+                    "route": route,
+                    "format": verdict.format,
+                    "reason": verdict.reason or verdict.error,
+                    "probe_ms": round(verdict.elapsed_ms, 2),
+                    "probe": verdict.probe,
+                    "error": verdict.error,
+                }
+            )
+        except Exception as exc:
+            print(f"✗ Triage error on {file.filename}: {exc}")
+            results.append(
+                {"filename": file.filename, "route": "error", "error": "Triage failed"}
+            )
+        finally:
+            if file_path and file_path.exists():
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+
+    counts = {"fast": 0, "ocr": 0, "unsupported": 0, "error": 0}
+    for row in results:
+        counts[row["route"]] = counts.get(row["route"], 0) + 1
+    return {"results": results, "total": len(results), "counts": counts}
 
 
 # ---------------------------------------------------------------------------

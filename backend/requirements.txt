@@ -31,3 +31,11 @@ openai>=1.65.2
 # YOLO Notes region detection (AGPL-3.0 — commercial use requires an
 # Ultralytics Enterprise License). Pulls in torchvision.
 ultralytics>=8.3.0
+
+# fastdoc office parsers. Small pure-Python packages; the PDF fast path does
+# not need them (it runs on pdftext, already required above). Without these,
+# /api/convert-fast still serves PDF/CSV/TXT and reports a clear error for
+# the office formats instead of failing obscurely.
+python-docx>=1.1.0
+openpyxl>=3.1.5
+python-pptx>=1.0.2
