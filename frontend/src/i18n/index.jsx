@@ -181,7 +181,7 @@ export const translations = {
 
   zh: {
     // Product
-    productName:    "藍圖析",
+    productName:    "規格析",
     productSubtitle: "圖紙智析系統",
 
     // Modes
