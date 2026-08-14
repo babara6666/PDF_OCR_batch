@@ -1,0 +1,92 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Company GPU deployment — SINGLE all-in-one image (frontend + backend in one
+# container via supervisord). Simpler than docker-compose.company.yml: one image,
+# one container, one exposed port.
+#
+# The image bakes:
+#   • React frontend (pre-built static assets, served by nginx)
+#   • FastAPI backend (uvicorn on internal :8001, proxied by nginx)
+#   • Surya / Datalab OCR model weights + Marker font (fully offline)
+#   • YOLO Notes detection model (notes_best.pt)
+#
+# Prerequisites on the GPU host:
+#   • Docker + NVIDIA Container Toolkit
+#     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#   • ./_bundle present (staged model cache) — required for the BUNDLE_MODELS build
+#
+# Build (run once on the GPU host):
+#   docker compose -f docker-compose.allinone.yml build
+# Run:
+#   docker compose -f docker-compose.allinone.yml up -d
+# Open:  http://<host>:8080
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.allinone
+      args:
+        # CUDA 12.6 wheels (compatible with driver 12.6+/12.8). Adjust if needed.
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu126
+        # Bake the pre-downloaded models + font into the image (needs ./_bundle).
+        BUNDLE_MODELS: "true"
+        # Frontend calls the API relatively; nginx proxies /api/* internally.
+        VITE_API_BASE_URL: /
+    image: printlens:allinone
+    container_name: printlens
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8001"
+      # Models are baked in → stay fully offline, never reach the network.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      # ── Resource bounds ────────────────────────────────────────────────
+      # Bound the per-request batch size. Moves together with
+      # `client_max_body_size` in nginx.allinone.conf — raising one without
+      # the other either wastes the limit or silently truncates uploads.
+      MAX_BATCH_FILES: "50"
+      # Uncompressed ceiling for docx/xlsx/pptx (zip-bomb guard).
+      MAX_UNCOMPRESSED_SIZE: "209715200"
+      # Marker owns the GPU; keep OCR serialised so concurrent runs cannot
+      # fight over VRAM. Raise only if the card has headroom to spare.
+      MARKER_CONCURRENCY: "1"
+
+      # ── Access control ─────────────────────────────────────────────────
+      # Set API_KEY to require an `X-API-Key` header on every /api/* call
+      # (/api/health stays open so this healthcheck keeps working). Unset
+      # leaves the API open — fine behind a VPN/firewall allowlist, not on a
+      # routable company network.
+      API_KEY: "${API_KEY:-}"
+      RATE_LIMIT_REQUESTS: "${RATE_LIMIT_REQUESTS:-60}"
+      RATE_LIMIT_WINDOW: "${RATE_LIMIT_WINDOW:-60}"
+
+      # Writable config dir for Ultralytics (avoids a startup warning).
+      YOLO_CONFIG_DIR: "/tmp/Ultralytics"
+      NVIDIA_VISIBLE_DEVICES: "all"
+    volumes:
+      # Only ephemeral uploads need a volume; model weights live inside the image.
+      - upload_tmp:/app/backend/uploads
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/health')"
+      interval: 30s
+      timeout: 10s
+      start_period: 180s   # models are local → no multi-GB first-run download
+      retries: 5
+
+volumes:
+  upload_tmp:
+    driver: local

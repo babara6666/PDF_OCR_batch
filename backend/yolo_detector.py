@@ -17,7 +17,6 @@ Usage
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple
 
 from PIL import Image
 
@@ -30,7 +29,7 @@ class YOLONotesDetector:
 
     def __init__(self) -> None:
         self._model = None
-        self._model_path: Optional[Path] = None
+        self._model_path: Path | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -76,7 +75,7 @@ class YOLONotesDetector:
         self,
         image: Image.Image,
         conf: float = MIN_CONFIDENCE,
-    ) -> Optional[Tuple[int, int, int, int]]:
+    ) -> tuple[int, int, int, int] | None:
         """
         Run inference on a PIL image and return the Notes bbox.
 
@@ -134,7 +133,7 @@ class YOLONotesDetector:
         self,
         image: Image.Image,
         conf: float = MIN_CONFIDENCE,
-    ) -> Optional[Tuple[float, float, float, float]]:
+    ) -> tuple[float, float, float, float] | None:
         """
         Like :meth:`detect` but returns coordinates as fractions of the
         image dimensions (0–1), matching the template-coordinate convention

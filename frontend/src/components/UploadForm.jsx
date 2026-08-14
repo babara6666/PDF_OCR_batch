@@ -14,6 +14,8 @@ const UploadForm = ({
   onThresholdChange,
   onThresholdReset,
   defaultThresholds = DEFAULT_THRESHOLDS,
+  dualMode = false,
+  onDualModeChange,
 }) => {
   const { t } = useT();
   const [isDragging, setIsDragging] = useState(false);
@@ -312,6 +314,23 @@ const UploadForm = ({
           <span className="material-symbols-outlined text-sm">speed</span>
           <span className="text-xs font-label">{t.batchSupported}</span>
         </div>
+
+        {/* Dual output — only meaningful for the OCR pipeline */}
+        {mode === "ocr" && onDualModeChange && (
+          <label
+            className="flex items-center gap-2 cursor-pointer select-none ml-auto"
+            title={t.dualModeHint}
+          >
+            <input
+              type="checkbox"
+              checked={dualMode}
+              onChange={(e) => onDualModeChange(e.target.checked)}
+              className="w-4 h-4 accent-primary dark:accent-[#dcc497] cursor-pointer"
+            />
+            <span className="material-symbols-outlined text-sm">difference</span>
+            <span className="text-xs font-label">{t.dualMode}</span>
+          </label>
+        )}
       </div>
     </section>
   );

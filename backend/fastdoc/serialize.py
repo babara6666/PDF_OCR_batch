@@ -34,6 +34,32 @@ _LINE_START_RE = re.compile(r"^([ \t]*)(#{1,6}|[-+]|\d{1,9}[.)]|={2,})(?=[ \t]|$
 # (file_name_here) would just add noise.
 _UNDERSCORE_RE = re.compile(r"(?<!\w)_|_(?!\w)")
 
+# Link schemes that may survive into the Markdown. A PDF's link annotations
+# are attacker-controlled — whatever URL the file declares gets carried
+# through here — and `javascript:` in a Markdown link is a live XSS payload
+# for any renderer that does not strip it. react-markdown does strip it
+# today, but that is the *frontend's* default, not a guarantee this output
+# will only ever be rendered there.
+_SAFE_SCHEMES = {"http", "https", "mailto", "tel", "ftp"}
+
+
+def safe_href(href: str) -> str:
+    """Return the URL if its scheme is safe to emit, else empty string.
+
+    Schemeless values (`page2.html`, `#anchor`, `/docs/x`) are relative and
+    carry no scheme risk, so they pass through.
+    """
+    if not href:
+        return ""
+    head = href.split(":", 1)[0].lower() if ":" in href else ""
+    if not head:
+        return href
+    # A "scheme" containing / ? # is not a scheme — it is a relative path
+    # that happens to contain a colon, e.g. `notes/ch1:2.html`.
+    if any(c in head for c in "/?#"):
+        return href
+    return href if head in _SAFE_SCHEMES else ""
+
 
 def _escape_line_start(match: re.Match) -> str:
     """Neutralise a leading block marker.
@@ -130,8 +156,10 @@ def render_inlines(
             elif span.italic:
                 body = _emphasize(body, "*")
         if span.href:
-            href = span.href.replace("(", "%28").replace(")", "%29").replace(" ", "%20")
-            body = f"[{body}]({href})"
+            href = safe_href(span.href)
+            if href:
+                href = href.replace("(", "%28").replace(")", "%29").replace(" ", "%20")
+                body = f"[{body}]({href})"
         parts.append(body)
     return "".join(parts).strip()
 

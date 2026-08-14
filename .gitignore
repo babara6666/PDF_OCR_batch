@@ -251,3 +251,9 @@ models/*.pt
 printlens-images.tar.gz
 # Staged deploy bundle with model weights (3.3GB — never commit)
 printlens-deploy/
+
+# Hand-staged deploy copy. It is an OLDER snapshot of backend/ (no UUID upload
+# paths, no fastdoc, no YOLO) and must never be committed or built from —
+# `git add -A` would otherwise pull the stale, vulnerable code onto the branch.
+# Build every image from backend/ at the repo root instead.
+deploy/

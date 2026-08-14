@@ -5,8 +5,12 @@ Checks sharpness, brightness, and contrast before running expensive OCR.
 Uses only Pillow + numpy + scipy (all already in the dependency tree).
 """
 
+import logging
+
 import numpy as np
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 # --- Thresholds (tune based on your document corpus) ---
 # Gradient kurtosis: measures how "peaked" the edge distribution is.
@@ -73,6 +77,12 @@ def check_document_quality(
             "contrast": float,      # Std dev of pixel values
             "reason": str,          # Empty string if passed
         }
+
+    A file this function cannot open fails the check. It used to pass with
+    all-zero scores, which meant a truncated PDF sailed through looking
+    pristine and only died deep inside the OCR pipeline — the opposite of
+    what a pre-OCR gate is for. Callers that want to OCR anyway have
+    `force=true` on the batch endpoint.
     """
     result = {
         "passed": True,
@@ -109,7 +119,16 @@ def check_document_quality(
             result["reason"] = "Quality check failed: " + "; ".join(reasons)
 
     except Exception as e:
-        # Quality check failure should not block processing — log and pass
-        print(f"  ⚠ Quality check error (skipped): {e}")
+        logger.warning("Quality check could not read %s: %s", file_path, e)
+        result["passed"] = False
+        result["blur_score"] = 0.0
+        result["brightness"] = 0.0
+        result["contrast"] = 0.0
+        result["reason"] = (
+            "Quality check failed: file could not be parsed "
+            "(corrupt, truncated, or unsupported encoding)"
+        )
+        # The exception itself stays in the log — the client gets the generic
+        # reason above, same as every other error path in this service.
 
     return result

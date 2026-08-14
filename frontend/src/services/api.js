@@ -3,8 +3,12 @@
  */
 import axios from "axios";
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:8001";
+// Relative by default: requests go to the same origin the page was served
+// from, and whatever sits in front (vite proxy in dev, nginx in prod)
+// forwards /api/* to the backend. A hardcoded host would send every LAN
+// visitor's browser to its own localhost, where nothing is listening.
+// Only set VITE_API_BASE_URL when the API genuinely lives on another origin.
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -101,16 +105,21 @@ export const checkQualityBatch = async (files, thresholds = {}, onProgress) => {
  * @param {File[]} files - Array of files to upload
  * @param {Function} onProgress - Upload progress callback (0-100)
  * @param {boolean} force - Skip quality-check blocking
+ * @param {boolean} dual - Run both engines and return both outputs
  * @returns {Promise} Response with { results, total, succeeded }
  */
-export const uploadBatch = async (files, onProgress, force = false) => {
+export const uploadBatch = async (files, onProgress, force = false, dual = false) => {
   const formData = new FormData();
   files.forEach((file) => {
     formData.append("files", file);
   });
 
+  // `dual` is always sent explicitly so the toggle can turn dual output off
+  // even when the server defaults it on via FASTDOC_DUAL.
+  const params = new URLSearchParams({ force: String(force), dual: String(dual) });
+
   try {
-    const response = await api.post(`/api/upload-batch?force=${force}`, formData, {
+    const response = await api.post(`/api/upload-batch?${params}`, formData, {
       timeout: 300_000 + files.length * 600_000, // 5min base + 10min per file
       onUploadProgress: (progressEvent) => {
         const percentCompleted = Math.round(

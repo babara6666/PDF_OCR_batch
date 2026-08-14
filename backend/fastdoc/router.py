@@ -14,7 +14,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from .detect import IMAGE_FORMATS, detect_file
 from .model import Document
@@ -33,7 +32,7 @@ class Result:
     needs_ocr: bool = False
     reason: str = ""
     elapsed_ms: float = 0.0
-    probe: Optional[dict] = None
+    probe: dict | None = None
     warnings: list[str] = field(default_factory=list)
     error: str = ""
 

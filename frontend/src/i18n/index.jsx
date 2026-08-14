@@ -13,6 +13,12 @@ export const translations = {
     modeNotes:      "Extract Notes",
     modeNotesDesc:  "Detect and extract the 'Notes:' section from engineering drawings",
 
+    // Dual output
+    dualMode:       "Dual output",
+    dualModeHint:   "For documents that already carry a text layer, run both engines and keep both results",
+    engineMarker:   "Marker · layout",
+    engineFastdoc:  "Text layer · verbatim",
+
     // Sidebar / nav
     processingNav:  "Processing…",
     reviewing:      "Review",
@@ -189,6 +195,12 @@ export const translations = {
     modeOcrDesc:    "將 PDF / 圖片轉換為完整 Markdown",
     modeNotes:      "擷取備註",
     modeNotesDesc:  "自動偵測並擷取工程圖中的「Notes:」區塊",
+
+    // Dual output
+    dualMode:       "雙軌輸出",
+    dualModeHint:   "文件本身有文字層時，兩種引擎都跑，兩份結果都保留",
+    engineMarker:   "Marker · 排版",
+    engineFastdoc:  "文字層 · 原文",
 
     // Sidebar / nav
     processingNav:  "處理中…",

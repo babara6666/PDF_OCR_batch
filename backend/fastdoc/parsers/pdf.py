@@ -15,7 +15,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from ..model import (
     Cell,
@@ -134,7 +133,7 @@ def _cluster_columns(all_x: list[float], tol: float) -> list[float]:
     return cols
 
 
-def _as_table(lines: list[_Line], body_size: float) -> Optional[Table]:
+def _as_table(lines: list[_Line], body_size: float) -> Table | None:
     """Interpret a block as a table if its cells line up into columns."""
     if len(lines) < 2:
         return None
@@ -175,7 +174,7 @@ def _as_table(lines: list[_Line], body_size: float) -> Optional[Table]:
     return Table(header=header, rows=rows)
 
 
-def _list_marker(text: str) -> Optional[tuple[bool, str]]:
+def _list_marker(text: str) -> tuple[bool, str] | None:
     """Return (ordered, remaining_text) if the line opens a list item."""
     m = _BULLET_RE.match(text)
     if m:
@@ -376,7 +375,7 @@ def probe(
     )
 
 
-def read_pages(path: str | Path, page_range: Optional[list[int]] = None) -> list[dict]:
+def read_pages(path: str | Path, page_range: list[int] | None = None) -> list[dict]:
     from pdftext.extraction import dictionary_output
 
     kwargs = {"page_range": page_range} if page_range is not None else {}

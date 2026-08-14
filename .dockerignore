@@ -15,8 +15,11 @@ dist/
 # ── Node / frontend build artifacts ───────────────────────────────────────────
 frontend/node_modules/
 frontend/dist/
-deploy/frontend/node_modules/
-deploy/frontend/dist/
+
+# ── Stale hand-staged deploy copy ─────────────────────────────────────────────
+# An older snapshot of the backend (pre-UUID-upload-paths, no fastdoc/YOLO).
+# Keeping it out of the build context makes it impossible to ship by accident.
+deploy/
 
 # ── Secrets (never bake into images) ──────────────────────────────────────────
 .env

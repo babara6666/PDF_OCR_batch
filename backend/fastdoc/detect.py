@@ -10,9 +10,11 @@ compound-file signature, image magic numbers.
 from __future__ import annotations
 
 import io
+import logging
 import zipfile
 from pathlib import Path
-from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # How many bytes are enough to identify every signature below.
 SNIFF_SIZE = 8192
@@ -56,7 +58,7 @@ TEXT_FORMATS = {"pdf", "docx", "xlsx", "pptx", "csv", "txt", "md"}
 IMAGE_FORMATS = {"jpeg", "png", "gif", "bmp", "tiff", "webp"}
 
 
-def _zip_format(data: bytes, path: Optional[Path]) -> str:
+def _zip_format(data: bytes, path: Path | None) -> str:
     """Identify a ZIP container: OOXML, ODF, or EPUB."""
     try:
         source = str(path) if path else io.BytesIO(data)
@@ -78,7 +80,7 @@ def _zip_format(data: bytes, path: Optional[Path]) -> str:
     return "zip"
 
 
-def _ole_format(path: Optional[Path]) -> str:
+def _ole_format(path: Path | None) -> str:
     """Identify a legacy OLE compound file by its storage stream names."""
     try:
         import olefile  # type: ignore
@@ -92,8 +94,11 @@ def _ole_format(path: Optional[Path]) -> str:
             for stream, fmt in _OLE_STREAMS:
                 if stream in entries:
                     return fmt
-    except Exception:
-        pass
+    except Exception as exc:
+        # Falling back to the generic "ole" tag is fine — the caller will
+        # reject it as unsupported — but a silent failure here is why a
+        # mis-detected file looks like an unsupported one.
+        logger.debug("OLE probe failed for %s: %s", path, exc)
     return "ole"
 
 
@@ -129,7 +134,7 @@ def _looks_like_csv(head: bytes) -> bool:
     return False
 
 
-def detect_bytes(data: bytes, path: Optional[Path] = None) -> str:
+def detect_bytes(data: bytes, path: Path | None = None) -> str:
     """Identify a format from its leading bytes. Returns a short format tag."""
     head = data[:SNIFF_SIZE]
     if not head:

@@ -3,11 +3,15 @@ FastAPI Backend for PDF/Image OCR using Marker
 Provides CAD_OCR-compatible API interface
 """
 
+import asyncio
+import functools
+import logging
 import os
-import uuid
-from typing import List
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import uuid
+import zipfile
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 import torch
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -33,6 +37,12 @@ from yolo_detector import YOLONotesDetector  # noqa: E402
 import fastdoc  # noqa: E402
 from fastdoc.detect import detect_bytes  # noqa: E402
 from fastdoc.router import SUPPORTED as FASTDOC_FORMATS  # noqa: E402
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("printlens")
 
 # Configuration
 API_TITLE = "PDF/Image OCR Service (Marker + YOLO Notes)"
@@ -63,6 +73,37 @@ UPLOAD_DIR = Path(__file__).parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 PER_FILE_TIMEOUT = 600  # 10 minutes max per file
+
+# Ceiling on the *uncompressed* size of a ZIP-based upload (docx/xlsx/pptx).
+# The 50 MB MAX_FILE_SIZE only bounds the bytes on the wire; OOXML is XML in a
+# ZIP, and repetitive XML compresses hard enough that a few hundred KB can
+# expand into gigabytes of lxml DOM. Checked before any parser sees the file.
+MAX_UNCOMPRESSED_SIZE = int(
+    os.getenv("MAX_UNCOMPRESSED_SIZE", str(200 * 1024 * 1024))
+)
+
+# Shared secret for every /api/* route. Unset (the default) leaves the API
+# open, which is the current behaviour — set API_KEY in the environment to
+# require an `X-API-Key` header. /api/health stays open either way so
+# container/liveness probes keep working.
+API_KEY = os.getenv("API_KEY", "").strip()
+PUBLIC_PATHS = {"/", "/api/health", "/docs", "/openapi.json", "/redoc"}
+
+# Per-IP request cap. Generous by default — a batch run is a handful of very
+# large requests, not a flood — but it bounds how fast an anonymous caller can
+# queue up GPU work. Set RATE_LIMIT_REQUESTS=0 to disable.
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))
+RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
+
+# How many documents may sit inside the OCR pipeline at once. Marker holds the
+# GPU, so the default of 1 keeps the old serialised behaviour — the difference
+# is that waiting now happens on a semaphore instead of by blocking the event
+# loop, so /api/health answers while a batch runs.
+MARKER_CONCURRENCY = max(1, int(os.getenv("MARKER_CONCURRENCY", "1")))
+
+# Threads for the short CPU/IO-bound work: quality checks, magic-byte probes,
+# fastdoc conversion, writing uploads to disk.
+WORKER_THREADS = max(1, int(os.getenv("WORKER_THREADS", "4")))
 
 # Supported file types
 ALLOWED_EXTENSIONS = {
@@ -95,6 +136,15 @@ ALLOWED_MIMES = {
 # scan. Off by default so existing behaviour is unchanged until you opt in.
 FASTDOC_ROUTING = os.getenv("FASTDOC_ROUTING", "0").strip().lower() in {"1", "true", "yes", "on"}
 
+# Dual mode: instead of fastdoc *replacing* Marker on a text-layer document,
+# run both and return both. They fail in different directions — Marker
+# reconstructs layout (reading order, table structure, headings) but its text
+# is a model's best guess, while fastdoc copies the glyphs the file already
+# contains, so its characters are exact but its structure is inferred from
+# geometry. Neither is strictly better, so for documents worth checking twice
+# the useful answer is both. Requires FASTDOC_ROUTING.
+FASTDOC_DUAL = os.getenv("FASTDOC_DUAL", "0").strip().lower() in {"1", "true", "yes", "on"}
+
 # Extensions the fast-path endpoints accept. Wider than ALLOWED_EXTENSIONS
 # because these formats need no OCR — but the real check is on content.
 FASTDOC_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".pptx", ".csv", ".txt"}
@@ -105,6 +155,97 @@ MAX_BATCH_FILES = int(os.getenv("MAX_BATCH_FILES", "50"))
 
 # Global state
 app_data = {}
+
+# ---------------------------------------------------------------------------
+# Off-loop execution
+#
+# Every handler here is `async def`, so anything synchronous inside one runs on
+# the event loop and stalls *every* other connection — including /api/health.
+# A 40-file quality check measured 3.75s of that; a Marker run is minutes. So
+# all blocking work goes through these helpers instead.
+#
+# Two pools, because the two kinds of work want different limits: short
+# CPU/IO work can overlap freely, while Marker owns the GPU and must stay
+# serialised (MARKER_SEMAPHORE) or concurrent runs fight over VRAM.
+# ---------------------------------------------------------------------------
+
+IO_EXECUTOR = ThreadPoolExecutor(max_workers=WORKER_THREADS, thread_name_prefix="io")
+MARKER_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+async def run_off_loop(func, *args, **kwargs):
+    """Run a blocking callable on the shared IO pool."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        IO_EXECUTOR, functools.partial(func, *args, **kwargs)
+    )
+
+
+async def run_model(func, *args, timeout: float | None = None, **kwargs):
+    """Run a model/GPU job off-loop, serialised, with a wall-clock timeout.
+
+    Each job gets a private single-worker pool that is torn down with
+    `wait=False`: a job that blew past its timeout must not be able to hold up
+    the shutdown (or the next request) just because its thread is still stuck
+    inside Marker.
+
+    Raises asyncio.TimeoutError when the job outlives `timeout`.
+    """
+    assert MARKER_SEMAPHORE is not None, "lifespan did not run"
+    async with MARKER_SEMAPHORE:
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="marker")
+        try:
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(
+                executor, functools.partial(func, *args, **kwargs)
+            )
+            if timeout is None:
+                return await future
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            executor.shutdown(wait=False)
+
+
+def _safe_remove(path: Path | None) -> None:
+    """Delete a staged upload, logging rather than swallowing any failure.
+
+    Cleanup must never mask the real result of a request, but a temp file that
+    cannot be removed is how an uploads directory silently fills a disk.
+    """
+    if not path:
+        return
+    try:
+        if path.exists():
+            os.remove(path)
+    except OSError as exc:
+        logger.warning("Could not remove staged upload %s: %s", path, exc)
+
+
+async def write_upload(path: Path, content: bytes) -> None:
+    """Write a staged upload off the event loop (50 MB writes are not free)."""
+    await run_off_loop(path.write_bytes, content)
+
+
+def reject_if_zip_bomb(
+    path: Path, max_uncompressed: int = MAX_UNCOMPRESSED_SIZE
+) -> None:
+    """Reject a ZIP-based document that expands past the ceiling.
+
+    docx/xlsx/pptx are XML in a ZIP and python-docx / python-pptx materialise
+    the whole tree with lxml, so the compressed size on the wire says nothing
+    about the memory the parse will take. The central directory already
+    records every member's expanded size — read that before parsing, not after.
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            total = sum(zi.file_size for zi in zf.infolist())
+    except zipfile.BadZipFile as exc:
+        raise ValueError("not a readable document container") from exc
+    if total > max_uncompressed:
+        raise ValueError(
+            f"document expands to {total / 1024 / 1024:.0f} MB, "
+            f"over the {max_uncompressed / 1024 / 1024:.0f} MB limit"
+        )
 
 
 class OCRResponse(BaseModel):
@@ -118,8 +259,14 @@ class OCRResponse(BaseModel):
     blur_score: float = 0.0
     brightness: float = 0.0
     contrast: float = 0.0
-    # Which pipeline produced the markdown: "marker" (OCR) or "fastdoc".
+    # Which pipeline produced the markdown: "marker" (OCR), "fastdoc", or
+    # "dual" when both ran. In dual mode markdown_content still holds the
+    # Marker output — it is the one with reconstructed layout — and the
+    # verbatim text layer sits alongside it in fastdoc_markdown.
     engine: str = "marker"
+    fastdoc_markdown: str = ""
+    fastdoc_time: float = 0.0
+    marker_time: float = 0.0
 
 
 def get_file_extension(filename: str) -> str:
@@ -160,7 +307,7 @@ def get_file_type(filename: str) -> str:
     return "image"
 
 
-def try_fast_path(file_path: Path):
+async def try_fast_path(file_path: Path):
     """Convert without a model, or return None to fall through to Marker.
 
     Returns a `fastdoc.Result` only when the file genuinely carried its own
@@ -171,9 +318,9 @@ def try_fast_path(file_path: Path):
     if not FASTDOC_ROUTING:
         return None
     try:
-        result = fastdoc.convert(str(file_path))
+        result = await run_off_loop(fastdoc.convert, str(file_path))
     except Exception as exc:
-        print(f"  ⚠ Fast path error, falling back to OCR: {exc}")
+        logger.warning("Fast path error, falling back to OCR: %s", exc)
         return None
     if not result.ok:
         print(f"  → OCR required: {result.reason or result.error}")
@@ -182,6 +329,56 @@ def try_fast_path(file_path: Path):
         f"  ⚡ Fast path [{result.format}] in {result.elapsed_ms:.0f}ms — no GPU used"
     )
     return result
+
+
+def want_dual(override: bool | None) -> bool:
+    """Resolve whether both engines should run for this request.
+
+    The query parameter wins when supplied so a caller can compare engines
+    without restarting the server; otherwise the FASTDOC_DUAL default applies.
+    """
+    return FASTDOC_DUAL if override is None else override
+
+
+# Stand-in for a quality report when the gate was not run. The check exists to
+# reject scans too degraded to OCR; a file that already yielded a text layer
+# has nothing to score and is readable by definition.
+QUALITY_SKIPPED = {
+    "passed": True,
+    "blur_score": 0.0,
+    "brightness": 0.0,
+    "contrast": 0.0,
+    "reason": "",
+}
+
+
+def _ensure_models() -> None:
+    """Load the Marker model dict once. Blocking — call via run_off_loop."""
+    if "models" not in app_data:
+        app_data["models"] = create_model_dict()
+
+
+def run_marker(file_path: Path) -> str:
+    """Run the full Marker pipeline and return its Markdown."""
+    _ensure_models()
+    converter = PdfConverter(artifact_dict=app_data["models"])
+    rendered = converter(str(file_path))
+    markdown_text, _, _ = text_from_rendered(rendered)
+    return markdown_text
+
+
+# Matches the policy nginx sets in front. 'unsafe-inline' for styles is what
+# the bundled CSS-in-JS needs; scripts stay restricted to same-origin, which is
+# what actually blocks injected code.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "img-src 'self' data:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "
+    "object-src 'none'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'"
+)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -193,15 +390,99 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["X-XSS-Protection"] = "0"  # Modern browsers use CSP instead
+        response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         return response
+
+
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    """Require a shared key on /api/* when API_KEY is configured.
+
+    No-op when API_KEY is unset, so an existing deployment keeps working
+    unchanged; setting the variable is what turns the gate on. Health stays
+    reachable regardless — a probe that needs a credential is a probe that
+    reports the container unhealthy after a key rotation.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # OPTIONS is exempt so the CORS preflight — which browsers send
+        # without custom headers — still succeeds.
+        gated = (
+            API_KEY
+            and request.url.path not in PUBLIC_PATHS
+            and request.method != "OPTIONS"
+        )
+        if gated and request.headers.get("X-API-Key", "") != API_KEY:
+            logger.warning(
+                "Rejected unauthenticated %s %s", request.method, request.url.path
+            )
+            return JSONResponse(
+                status_code=401,
+                content={"success": False, "error": "Invalid or missing API key"},
+            )
+        return await call_next(request)
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Sliding-window per-IP cap on /api/* requests.
+
+    Deliberately in-process and dependency-free: this exists to stop one
+    client from queueing unbounded GPU work, not to be a distributed quota.
+    A single uvicorn process serves this app, so a dict of timestamps is the
+    whole mechanism.
+    """
+
+    def __init__(self, app):
+        super().__init__(app)
+        self._hits: dict[str, deque] = defaultdict(deque)
+
+    async def dispatch(self, request: Request, call_next):
+        if RATE_LIMIT_REQUESTS <= 0 or not request.url.path.startswith("/api/"):
+            return await call_next(request)
+        if request.url.path == "/api/health" or request.method == "OPTIONS":
+            return await call_next(request)
+
+        client = request.client.host if request.client else "unknown"
+        now = time.monotonic()
+        hits = self._hits[client]
+        while hits and now - hits[0] > RATE_LIMIT_WINDOW:
+            hits.popleft()
+        if len(hits) >= RATE_LIMIT_REQUESTS:
+            logger.warning("Rate limit hit by %s on %s", client, request.url.path)
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "success": False,
+                    "error": (
+                        f"Rate limit exceeded "
+                        f"({RATE_LIMIT_REQUESTS} requests / {RATE_LIMIT_WINDOW}s)"
+                    ),
+                },
+                headers={"Retry-After": str(RATE_LIMIT_WINDOW)},
+            )
+        hits.append(now)
+        return await call_next(request)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - load models on startup"""
+    global MARKER_SEMAPHORE
     print("\n" + "=" * 60)
     print(f"🚀 Starting {API_TITLE}")
     print("=" * 60)
+
+    # Bound to the running loop, so it has to be built here rather than at
+    # import time.
+    MARKER_SEMAPHORE = asyncio.Semaphore(MARKER_CONCURRENCY)
+    print(f"  Auth: {'API key required' if API_KEY else 'open (API_KEY unset)'}")
+    print(
+        "  Rate limit: "
+        + (
+            f"{RATE_LIMIT_REQUESTS} req / {RATE_LIMIT_WINDOW}s per IP"
+            if RATE_LIMIT_REQUESTS > 0
+            else "disabled"
+        )
+    )
 
     # Detect device
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -246,6 +527,7 @@ async def lifespan(app: FastAPI):
     if "models" in app_data:
         del app_data["models"]
     app_data.pop("yolo_detector", None)
+    IO_EXECUTOR.shutdown(wait=False)
     if device == "cuda":
         torch.cuda.empty_cache()
 
@@ -257,17 +539,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS. No cookies, sessions, or Authorization headers are used anywhere in
+# this app, so credentialed cross-origin requests are turned off — leaving
+# them on only widens what a future origin-list mistake would expose.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Accept"],
+    allow_headers=["Content-Type", "Accept", "X-API-Key"],
 )
 
 # Security headers
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Access control. Added last so they run first: reject before any work.
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(ApiKeyMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -288,6 +576,7 @@ async def root():
         "supported_formats": list(ALLOWED_EXTENSIONS),
         "fastdoc_formats": sorted(FASTDOC_EXTENSIONS),
         "fastdoc_routing": FASTDOC_ROUTING,
+        "fastdoc_dual": FASTDOC_DUAL,
         "yolo_notes_detector": bool(detector and detector.is_loaded),
         "endpoints": {
             "upload": "/api/upload",
@@ -311,6 +600,7 @@ async def health_check():
         "device": app_data.get("device", "unknown"),
         "yolo_notes_detector": bool(detector and detector.is_loaded),
         "fastdoc_routing": FASTDOC_ROUTING,
+        "fastdoc_dual": FASTDOC_DUAL,
         "supported_formats": list(ALLOWED_EXTENSIONS),
     }
 
@@ -323,7 +613,9 @@ async def yolo_status():
     loaded = bool(detector and detector.is_loaded)
     return {
         "loaded": loaded,
-        "model_path": str(yolo_model_path),
+        # Only the filename — the absolute path is server-side layout an
+        # unauthenticated caller has no reason to learn.
+        "model_name": yolo_model_path.name,
         "model_exists": yolo_model_path.exists(),
         "message": (
             "YOLO model active — Notes region detected automatically."
@@ -336,6 +628,9 @@ async def yolo_status():
 @app.post("/api/upload", response_model=OCRResponse)
 async def upload_and_process_file(
     file: UploadFile = File(..., description="PDF or Image file to process"),
+    dual: bool | None = Query(
+        None, description="Run both engines and return both (default: FASTDOC_DUAL)"
+    ),
 ):
     """Upload PDF or Image and convert to Markdown using Marker"""
     file_path = None
@@ -366,8 +661,7 @@ async def upload_and_process_file(
 
         # Sanitize filename to prevent path traversal
         file_path = unique_upload_path(file.filename)
-        with open(file_path, "wb") as f:
-            f.write(content)
+        await write_upload(file_path, content)
 
         print(f"\n{'=' * 60}")
         print(
@@ -377,8 +671,10 @@ async def upload_and_process_file(
 
         # Fast path first: a PDF with its own text layer needs neither the
         # image quality check (there is no image to score) nor the GPU.
-        fast = try_fast_path(file_path)
-        if fast is not None:
+        fast = await try_fast_path(file_path)
+        dual_mode = want_dual(dual)
+
+        if fast is not None and not dual_mode:
             processing_time = time.time() - start_time
             print(f"✓ Processing complete in {processing_time:.2f}s (fastdoc)\n")
             return OCRResponse(
@@ -389,29 +685,44 @@ async def upload_and_process_file(
                 processing_time=processing_time,
                 file_type=file_type,
                 engine="fastdoc",
+                fastdoc_time=fast.elapsed_ms / 1000.0,
             )
 
-        # Pre-OCR quality check
-        quality = check_document_quality(str(file_path), file_type)
-        print(f"  Quality — blur={quality['blur_score']} brightness={quality['brightness']} contrast={quality['contrast']}")
-        if not quality["passed"]:
-            print(f"  ✗ {quality['reason']}")
-            raise HTTPException(status_code=422, detail=quality["reason"])
+        # Pre-OCR quality check — only meaningful when Marker is reading pixels.
+        if fast is None:
+            quality = await run_off_loop(
+                check_document_quality, str(file_path), file_type
+            )
+            print(f"  Quality — blur={quality['blur_score']} brightness={quality['brightness']} contrast={quality['contrast']}")
+            if not quality["passed"]:
+                print(f"  ✗ {quality['reason']}")
+                raise HTTPException(status_code=422, detail=quality["reason"])
+        else:
+            quality = QUALITY_SKIPPED
+            print("  ⚡ Text layer already extracted — running Marker for layout")
 
-        # Ensure models are loaded
-        if "models" not in app_data:
-            print("Loading models...")
-            app_data["models"] = create_model_dict()
-
-        # Create converter and process
-        # PdfConverter auto-detects file type and uses appropriate provider
-        converter = PdfConverter(artifact_dict=app_data["models"])
-        rendered = converter(str(file_path))
-        markdown_text, _, _ = text_from_rendered(rendered)
+        marker_start = time.time()
+        try:
+            markdown_text = await run_model(
+                run_marker, file_path, timeout=PER_FILE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            print(f"  ✗ Timeout after {PER_FILE_TIMEOUT}s")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Processing timed out after {PER_FILE_TIMEOUT}s",
+            ) from None
+        marker_time = time.time() - marker_start
 
         processing_time = time.time() - start_time
 
-        print(f"✓ Processing complete in {processing_time:.2f}s\n")
+        if fast is None:
+            print(f"✓ Processing complete in {processing_time:.2f}s\n")
+        else:
+            print(
+                f"✓ Both engines complete in {processing_time:.2f}s "
+                f"(fastdoc {fast.elapsed_ms / 1000.0:.2f}s + marker {marker_time:.2f}s)\n"
+            )
 
         return OCRResponse(
             success=True,
@@ -423,25 +734,24 @@ async def upload_and_process_file(
             blur_score=quality["blur_score"],
             brightness=quality["brightness"],
             contrast=quality["contrast"],
+            engine="dual" if fast is not None else "marker",
+            fastdoc_markdown=fast.markdown if fast is not None else "",
+            fastdoc_time=fast.elapsed_ms / 1000.0 if fast is not None else 0.0,
+            marker_time=marker_time,
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"✗ Error: {e}")
-        raise HTTPException(status_code=500, detail="Processing failed")
+        logger.exception("Upload processing failed: %s", e)
+        raise HTTPException(status_code=500, detail="Processing failed") from e
     finally:
-        # Cleanup
-        if file_path and file_path.exists():
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
+        _safe_remove(file_path)
 
 
 @app.post("/api/check-quality-batch")
 async def check_quality_batch(
-    files: List[UploadFile] = File(..., description="Files to quality-check before OCR"),
+    files: list[UploadFile] = File(..., description="Files to quality-check before OCR"),
     min_sharpness:   float = Query(2.0,   description="Minimum gradient kurtosis (sharpness)"),
     min_brightness:  float = Query(25.0,  description="Minimum mean pixel brightness (0-255)"),
     max_brightness:  float = Query(245.0, description="Maximum mean pixel brightness (0-255)"),
@@ -499,10 +809,10 @@ async def check_quality_batch(
 
             file_type = get_file_type(file.filename)
             file_path = unique_upload_path(file.filename)
-            with open(file_path, "wb") as f:
-                f.write(content)
+            await write_upload(file_path, content)
 
-            quality = check_document_quality(
+            quality = await run_off_loop(
+                check_document_quality,
                 str(file_path), file_type,
                 sharpness_threshold=min_sharpness,
                 min_brightness=min_brightness,
@@ -515,7 +825,10 @@ async def check_quality_batch(
                 **quality,
             })
         except Exception as e:
-            print(f"  ✗ Quality check error for {getattr(file, 'filename', 'unknown')}: {e}")
+            logger.warning(
+                "Quality check error for %s: %s",
+                getattr(file, "filename", "unknown"), e,
+            )
             results.append({
                 "filename": getattr(file, "filename", "unknown"),
                 "file_size": 0,
@@ -526,11 +839,7 @@ async def check_quality_batch(
                 "reason": "Quality check failed",
             })
         finally:
-            if file_path and file_path.exists():
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
+            _safe_remove(file_path)
 
     passed = sum(1 for r in results if r["passed"])
     print(f"Quality check: {passed}/{len(results)} passed")
@@ -539,10 +848,13 @@ async def check_quality_batch(
 
 @app.post("/api/upload-batch")
 async def upload_and_process_batch(
-    files: List[UploadFile] = File(
+    files: list[UploadFile] = File(
         ..., description="Multiple PDF or Image files to process"
     ),
     force: bool = Query(False, description="Skip quality-check blocking and process regardless"),
+    dual: bool | None = Query(
+        None, description="Run both engines and return both (default: FASTDOC_DUAL)"
+    ),
 ):
     """Upload multiple PDF/Image files and convert each to Markdown sequentially"""
     if not files:
@@ -563,7 +875,11 @@ async def upload_and_process_batch(
     # Ensure models are loaded once
     if "models" not in app_data:
         print("Loading models...")
-        app_data["models"] = create_model_dict()
+        await run_off_loop(_ensure_models)
+
+    dual_mode = want_dual(dual)
+    if dual_mode:
+        print("  Dual mode: every text-layer file runs through both engines")
 
     for idx, file in enumerate(files, 1):
         file_path = None
@@ -606,8 +922,7 @@ async def upload_and_process_batch(
 
             file_type = get_file_type(file.filename)
             file_path = unique_upload_path(file.filename)
-            with open(file_path, "wb") as f:
-                f.write(content)
+            await write_upload(file_path, content)
 
             print(
                 f"\n[{idx}/{total}] Processing [{file_type.upper()}]: {file.filename} ({file_size / 1024:.1f} KB)"
@@ -615,8 +930,8 @@ async def upload_and_process_batch(
 
             # Fast path first — skips both the quality check and the GPU for
             # any file that already carries its own text.
-            fast = try_fast_path(file_path)
-            if fast is not None:
+            fast = await try_fast_path(file_path)
+            if fast is not None and not dual_mode:
                 processing_time = time.time() - start_time
                 print(f"  ⚡ Done in {processing_time:.2f}s (fastdoc)")
                 results.append(
@@ -629,58 +944,85 @@ async def upload_and_process_batch(
                         "file_type": file_type,
                         "error": "",
                         "engine": "fastdoc",
+                        "fastdoc_time": fast.elapsed_ms / 1000.0,
                     }
                 )
                 continue
 
-            # Pre-OCR quality check
-            quality = check_document_quality(str(file_path), file_type)
-            print(f"  Quality — blur={quality['blur_score']} brightness={quality['brightness']} contrast={quality['contrast']}")
-            if not quality["passed"]:
-                if force:
-                    print(f"  ⚠ Quality warning (force=true, proceeding): {quality['reason']}")
-                else:
-                    print(f"  ✗ {quality['reason']}")
-                    results.append(
-                        {
-                            "success": False,
-                            "filename": file.filename,
-                            "markdown_content": "",
-                            "file_size": file_size,
-                            "processing_time": time.time() - start_time,
-                            "file_type": file_type,
-                            "error": quality["reason"],
-                        }
-                    )
-                    continue
+            # Pre-OCR quality check — only meaningful when Marker reads pixels.
+            if fast is None:
+                quality = await run_off_loop(
+                    check_document_quality, str(file_path), file_type
+                )
+                print(f"  Quality — blur={quality['blur_score']} brightness={quality['brightness']} contrast={quality['contrast']}")
+                if not quality["passed"]:
+                    if force:
+                        print(f"  ⚠ Quality warning (force=true, proceeding): {quality['reason']}")
+                    else:
+                        print(f"  ✗ {quality['reason']}")
+                        results.append(
+                            {
+                                "success": False,
+                                "filename": file.filename,
+                                "markdown_content": "",
+                                "file_size": file_size,
+                                "processing_time": time.time() - start_time,
+                                "file_type": file_type,
+                                "error": quality["reason"],
+                            }
+                        )
+                        continue
+            else:
+                quality = QUALITY_SKIPPED
+                print("  ⚡ Text layer extracted — running Marker for layout")
 
             def _process_file(fpath):
                 converter = PdfConverter(artifact_dict=app_data["models"])
                 rendered = converter(str(fpath))
                 return text_from_rendered(rendered)
 
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_process_file, file_path)
-                try:
-                    markdown_text, _, _ = future.result(timeout=PER_FILE_TIMEOUT)
-                except FuturesTimeoutError:
-                    future.cancel()
-                    processing_time = time.time() - start_time
-                    print(
-                        f"  ✗ Timeout after {processing_time:.0f}s (limit: {PER_FILE_TIMEOUT}s)"
-                    )
+            marker_start = time.time()
+            try:
+                markdown_text, _, _ = await run_model(
+                    _process_file, file_path, timeout=PER_FILE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                processing_time = time.time() - start_time
+                print(
+                    f"  ✗ Timeout after {processing_time:.0f}s (limit: {PER_FILE_TIMEOUT}s)"
+                )
+                if fast is not None:
+                    # Marker gave up, but the text layer was already read.
+                    # Returning it beats discarding a finished result.
+                    print("  ⚡ Keeping the fastdoc output")
                     results.append(
                         {
-                            "success": False,
+                            "success": True,
                             "filename": file.filename,
-                            "markdown_content": "",
+                            "markdown_content": fast.markdown,
                             "file_size": file_size,
                             "processing_time": processing_time,
                             "file_type": file_type,
-                            "error": f"Processing timed out after {PER_FILE_TIMEOUT}s",
+                            "error": "",
+                            "engine": "fastdoc",
+                            "fastdoc_time": fast.elapsed_ms / 1000.0,
+                            "warning": f"Marker timed out after {PER_FILE_TIMEOUT}s; text layer only",
                         }
                     )
                     continue
+                results.append(
+                    {
+                        "success": False,
+                        "filename": file.filename,
+                        "markdown_content": "",
+                        "file_size": file_size,
+                        "processing_time": processing_time,
+                        "file_type": file_type,
+                        "error": f"Processing timed out after {PER_FILE_TIMEOUT}s",
+                    }
+                )
+                continue
+            marker_time = time.time() - marker_start
 
             processing_time = time.time() - start_time
             print(f"  ✓ Done in {processing_time:.2f}s")
@@ -694,7 +1036,10 @@ async def upload_and_process_batch(
                     "processing_time": processing_time,
                     "file_type": file_type,
                     "error": "",
-                    "engine": "marker",
+                    "engine": "dual" if fast is not None else "marker",
+                    "fastdoc_markdown": fast.markdown if fast is not None else "",
+                    "fastdoc_time": fast.elapsed_ms / 1000.0 if fast is not None else 0.0,
+                    "marker_time": marker_time,
                     "blur_score": quality["blur_score"],
                     "brightness": quality["brightness"],
                     "contrast": quality["contrast"],
@@ -702,7 +1047,7 @@ async def upload_and_process_batch(
             )
         except Exception as e:
             processing_time = time.time() - start_time
-            print(f"  ✗ Error: {e}")
+            logger.exception("Batch item failed (%s): %s", file.filename, e)
             results.append(
                 {
                     "success": False,
@@ -715,11 +1060,7 @@ async def upload_and_process_batch(
                 }
             )
         finally:
-            if file_path and file_path.exists():
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
+            _safe_remove(file_path)
 
     succeeded = sum(1 for r in results if r["success"])
     print(f"\n📦 Batch complete: {succeeded}/{total} succeeded")
@@ -755,8 +1096,20 @@ async def _stage_fastdoc_upload(file: UploadFile) -> tuple[Path, str, int]:
         )
 
     path = unique_upload_path(file.filename)
-    with open(path, "wb") as handle:
-        handle.write(content)
+    await write_upload(path, content)
+
+    # OOXML only: the 50 MB check above bounds the wire, not the parse.
+    if detected in {"docx", "xlsx", "pptx"}:
+        try:
+            await run_off_loop(reject_if_zip_bomb, path)
+        except ValueError as exc:
+            _safe_remove(path)
+            logger.warning("Rejected oversized container %s: %s", file.filename, exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception:
+            _safe_remove(path)
+            raise
+
     return path, detected, len(content)
 
 
@@ -773,7 +1126,19 @@ async def convert_fast(
     file_path = None
     try:
         file_path, detected, file_size = await _stage_fastdoc_upload(file)
-        result = fastdoc.convert(str(file_path), page_breaks=page_breaks)
+        # Bounded: a large-but-legal document can still be slow to walk, and
+        # this endpoint is reachable without a model loaded, so nothing else
+        # would stop it.
+        try:
+            result = await asyncio.wait_for(
+                run_off_loop(fastdoc.convert, str(file_path), page_breaks=page_breaks),
+                timeout=PER_FILE_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail=f"Conversion timed out after {PER_FILE_TIMEOUT}s",
+            ) from None
 
         if not result.ok:
             raise HTTPException(
@@ -796,19 +1161,15 @@ async def convert_fast(
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"✗ Fast conversion error: {exc}")
-        raise HTTPException(status_code=500, detail="Conversion failed")
+        logger.exception("Fast conversion error: %s", exc)
+        raise HTTPException(status_code=500, detail="Conversion failed") from exc
     finally:
-        if file_path and file_path.exists():
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
+        _safe_remove(file_path)
 
 
 @app.post("/api/triage-batch")
 async def triage_batch(
-    files: List[UploadFile] = File(..., description="Files to route before any OCR"),
+    files: list[UploadFile] = File(..., description="Files to route before any OCR"),
 ):
     """Report which files need OCR and which can take the fast path.
 
@@ -839,10 +1200,9 @@ async def triage_batch(
                 continue
 
             file_path = unique_upload_path(file.filename)
-            with open(file_path, "wb") as handle:
-                handle.write(content)
+            await write_upload(file_path, content)
 
-            verdict = fastdoc.triage(str(file_path))
+            verdict = await run_off_loop(fastdoc.triage, str(file_path))
             if verdict.needs_ocr:
                 route = "ocr"
             elif verdict.ok:
@@ -862,16 +1222,12 @@ async def triage_batch(
                 }
             )
         except Exception as exc:
-            print(f"✗ Triage error on {file.filename}: {exc}")
+            logger.warning("Triage error on %s: %s", file.filename, exc)
             results.append(
                 {"filename": file.filename, "route": "error", "error": "Triage failed"}
             )
         finally:
-            if file_path and file_path.exists():
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
+            _safe_remove(file_path)
 
     counts = {"fast": 0, "ocr": 0, "unsupported": 0, "error": 0}
     for row in results:
@@ -923,8 +1279,7 @@ async def extract_notes_single(
             )
 
         file_path = unique_upload_path(file.filename)
-        with open(file_path, "wb") as f:
-            f.write(content)
+        await write_upload(file_path, content)
 
         print(f"\n{'=' * 60}")
         print(f"Extracting Notes from: {file.filename} ({file_size / 1024:.1f} KB)")
@@ -932,14 +1287,23 @@ async def extract_notes_single(
 
         if "models" not in app_data:
             print("Loading models...")
-            app_data["models"] = create_model_dict()
+            await run_off_loop(_ensure_models)
 
-        result = extract_notes_from_pdf(
-            str(file_path),
-            app_data["models"],
-            include_crop_image=include_image,
-            yolo_detector=app_data.get("yolo_detector"),
-        )
+        try:
+            result = await run_model(
+                extract_notes_from_pdf,
+                str(file_path),
+                app_data["models"],
+                include_crop_image=include_image,
+                yolo_detector=app_data.get("yolo_detector"),
+                timeout=PER_FILE_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            print(f"✗ Timeout after {PER_FILE_TIMEOUT}s")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Processing timed out after {PER_FILE_TIMEOUT}s",
+            ) from None
 
         processing_time = time.time() - start_time
         result["filename"] = file.filename
@@ -954,21 +1318,17 @@ async def extract_notes_single(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"✗ Error: {e}")
+        logger.exception("Notes extraction failed: %s", e)
         raise HTTPException(
             status_code=500, detail="Notes extraction failed"
-        )
+        ) from e
     finally:
-        if file_path and file_path.exists():
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
+        _safe_remove(file_path)
 
 
 @app.post("/api/extract-notes-batch")
 async def extract_notes_batch(
-    files: List[UploadFile] = File(
+    files: list[UploadFile] = File(
         ..., description="Multiple PDF engineering drawings"
     ),
     include_image: bool = Query(True, description="Return base64 crop images"),
@@ -998,7 +1358,7 @@ async def extract_notes_batch(
 
     if "models" not in app_data:
         print("Loading models...")
-        app_data["models"] = create_model_dict()
+        await run_off_loop(_ensure_models)
 
     for idx, file in enumerate(files, 1):
         file_path = None
@@ -1055,8 +1415,7 @@ async def extract_notes_batch(
                 continue
 
             file_path = unique_upload_path(file.filename)
-            with open(file_path, "wb") as f:
-                f.write(content)
+            await write_upload(file_path, content)
 
             print(f"\n[{idx}/{total}] {file.filename} ({file_size / 1024:.1f} KB)")
 
@@ -1068,27 +1427,26 @@ async def extract_notes_batch(
                     yolo_detector=app_data.get("yolo_detector"),
                 )
 
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_extract, file_path)
-                try:
-                    result = future.result(timeout=PER_FILE_TIMEOUT)
-                except FuturesTimeoutError:
-                    future.cancel()
-                    processing_time = time.time() - start_time
-                    print(f"  ✗ Timeout after {processing_time:.0f}s")
-                    results.append(
-                        {
-                            "success": False,
-                            "filename": file.filename,
-                            "notes_text": None,
-                            "crop_image_b64": None,
-                            "crop_bbox": None,
-                            "error": f"Processing timed out after {PER_FILE_TIMEOUT}s",
-                            "processing_time": processing_time,
-                            "file_size": file_size,
-                        }
-                    )
-                    continue
+            try:
+                result = await run_model(
+                    _extract, file_path, timeout=PER_FILE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                processing_time = time.time() - start_time
+                print(f"  ✗ Timeout after {processing_time:.0f}s")
+                results.append(
+                    {
+                        "success": False,
+                        "filename": file.filename,
+                        "notes_text": None,
+                        "crop_image_b64": None,
+                        "crop_bbox": None,
+                        "error": f"Processing timed out after {PER_FILE_TIMEOUT}s",
+                        "processing_time": processing_time,
+                        "file_size": file_size,
+                    }
+                )
+                continue
 
             processing_time = time.time() - start_time
             result["filename"] = file.filename
@@ -1101,7 +1459,10 @@ async def extract_notes_batch(
 
         except Exception as e:
             processing_time = time.time() - start_time
-            print(f"  ✗ Error: {e}")
+            logger.exception(
+                "Notes batch item failed (%s): %s",
+                getattr(file, "filename", f"file_{idx}"), e,
+            )
             results.append(
                 {
                     "success": False,
@@ -1115,11 +1476,7 @@ async def extract_notes_batch(
                 }
             )
         finally:
-            if file_path and file_path.exists():
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
+            _safe_remove(file_path)
 
     succeeded = sum(1 for r in results if r["success"])
     print(f"\nBatch complete: {succeeded}/{total} succeeded")

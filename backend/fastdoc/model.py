@@ -13,7 +13,6 @@ flat list of Spans, which is enough for GFM and keeps parsers simple.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Union
 
 
 @dataclass
@@ -24,7 +23,7 @@ class Span:
     bold: bool = False
     italic: bool = False
     code: bool = False
-    href: Optional[str] = None
+    href: str | None = None
 
 
 Inlines = list[Span]
@@ -59,9 +58,9 @@ class CodeBlock:
 
 @dataclass
 class ListItem:
-    blocks: list["Block"] = field(default_factory=list)
+    blocks: list[Block] = field(default_factory=list)
     # None = plain item, True/False = GFM task-list checkbox
-    checked: Optional[bool] = None
+    checked: bool | None = None
 
 
 @dataclass
@@ -93,7 +92,7 @@ class Image:
 
 @dataclass
 class Blockquote:
-    blocks: list["Block"] = field(default_factory=list)
+    blocks: list[Block] = field(default_factory=list)
 
 
 @dataclass
@@ -111,21 +110,21 @@ class PageBreak:
 @dataclass
 class Footnote:
     label: str
-    blocks: list["Block"] = field(default_factory=list)
+    blocks: list[Block] = field(default_factory=list)
 
 
-Block = Union[
-    Heading,
-    Paragraph,
-    CodeBlock,
-    ListBlock,
-    Table,
-    Image,
-    Blockquote,
-    Rule,
-    PageBreak,
-    Footnote,
-]
+Block = (
+    Heading
+    | Paragraph
+    | CodeBlock
+    | ListBlock
+    | Table
+    | Image
+    | Blockquote
+    | Rule
+    | PageBreak
+    | Footnote
+)
 
 
 @dataclass

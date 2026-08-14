@@ -75,6 +75,14 @@ function App() {
   const [progress, setProgress]           = useState(0);
   const [results, setResults]             = useState(null);
   const [error, setError]                 = useState(null);
+  // Dual output: run Marker and the text-layer extractor on the same file.
+  const [dualMode, setDualMode]           = useState(
+    () => localStorage.getItem("dualMode") === "1",
+  );
+
+  useEffect(() => {
+    localStorage.setItem("dualMode", dualMode ? "1" : "0");
+  }, [dualMode]);
 
   // ── Mode switching ───────────────────────────────────────────────────────────
   const handleModeChange = (newMode) => {
@@ -152,7 +160,7 @@ function App() {
     try {
       let response;
       if (mode === "ocr") {
-        response = await uploadBatch(filesToProcess, onUpload, force);
+        response = await uploadBatch(filesToProcess, onUpload, force, dualMode);
       } else {
         response = await extractNotesBatch(filesToProcess, true, onUpload);
       }
@@ -358,6 +366,8 @@ function App() {
               onThresholdChange={updateThreshold}
               onThresholdReset={resetThresholds}
               defaultThresholds={DEFAULT_THRESHOLDS}
+              dualMode={dualMode}
+              onDualModeChange={setDualMode}
             />
           )}
 

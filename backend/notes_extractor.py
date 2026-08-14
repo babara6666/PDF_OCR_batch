@@ -53,10 +53,7 @@ Pipeline
 
 import base64
 import io
-import os
 import re
-from pathlib import Path
-from typing import Optional, Tuple
 
 import pypdfium2 as pdfium
 from PIL import Image
@@ -114,7 +111,7 @@ def _crop_notes_region(
     x_max: float,
     y_min: float,
     y_max: float,
-) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
+) -> tuple[Image.Image, tuple[int, int, int, int]]:
     """
     Crop the Notes text region from a rendered page image using fractional
     coordinates.  Returns ``(cropped_image, (x0, y0, x1, y1))`` in pixels.
@@ -133,7 +130,7 @@ def _crop_notes_region_pixels(
     y0: int,
     x1: int,
     y1: int,
-) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
+) -> tuple[Image.Image, tuple[int, int, int, int]]:
     """
     Crop using absolute pixel coordinates (from YOLO detection).
     Clamps values to image bounds.

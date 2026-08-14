@@ -238,6 +238,39 @@ FASTDOC_ROUTING=1
 回應多一個 `engine` 欄位（`fastdoc` 或 `marker`）標示實際走哪條路。
 **掃描件的處理結果不受影響**——快速路徑只會少做工，不會降低輸出品質。
 
+### 雙軌輸出（同一份文件兩種結果）
+
+分流模式是「有文字層就用 fastdoc **取代** Marker」。雙軌模式則是**兩種都跑、兩份都回**，
+因為兩者的失敗方向不同：
+
+| | 強項 | 弱項 |
+|---|------|------|
+| **Marker** | 重建版面：閱讀順序、表格結構、標題階層 | 文字是模型的辨識結果，可能認錯字 |
+| **fastdoc** | 直接複製檔案內既有的字元，**一個字都不會錯** | 結構是從座標與字級「猜」出來的 |
+
+沒有哪一邊絕對比較好，值得覆核的文件就兩份都留著比對。
+
+```bash
+# .env
+FASTDOC_ROUTING=1
+FASTDOC_DUAL=1
+```
+
+也可以每次請求指定，不必改設定重啟：
+
+```bash
+curl -X POST "http://localhost:8001/api/upload?dual=true" -F "file=@spec.pdf"
+```
+
+回應中 `engine` 會是 `dual`，`markdown_content` 是 Marker 的版面重建結果，
+`fastdoc_markdown` 是原文字層，另外附上 `marker_time` 與 `fastdoc_time` 方便比較成本。
+
+前端「雙軌輸出」開關會覆寫 `FASTDOC_DUAL` 預設值；結果頁的預覽區會多出
+**Marker · 排版** / **文字層 · 原文** 切換，下載時兩份都會存成
+`<檔名>.marker.md` 與 `<檔名>.fastdoc.md`。
+
+掃描件不受影響——沒有文字層就沒有第二份可比，照常只走 Marker。
+
 ### 先量測再決定
 
 在自己的檔案上跑，看快速路徑對你的語料有沒有價值：
@@ -272,8 +305,8 @@ python -m pytest backend/tests/test_fastdoc.py -q
 |------|------|------|
 | `/` | GET | API 資訊與支援格式 |
 | `/api/health` | GET | 健康檢查（含模型載入狀態） |
-| `/api/upload` | POST | 單一檔案 OCR 轉換 |
-| `/api/upload-batch` | POST | 批次 OCR 轉換（最多 50 檔） |
+| `/api/upload` | POST | 單一檔案 OCR 轉換（`?dual=true` 兩種引擎都輸出） |
+| `/api/upload-batch` | POST | 批次 OCR 轉換（最多 50 檔，同樣支援 `?dual=true`） |
 | `/api/check-quality-batch` | POST | 批次品質預檢（不執行 OCR） |
 | `/api/convert-fast` | POST | 快速路徑轉換（免模型；掃描件回 422） |
 | `/api/triage-batch` | POST | 批次分流：判斷每個檔要走 OCR 還是快速路徑 |
@@ -299,9 +332,45 @@ curl -X POST http://localhost/api/upload-batch \
   "filename": "document.pdf",
   "markdown_content": "# Title\n...",
   "file_size": 12345,
-  "processing_time": 5.67
+  "processing_time": 5.67,
+  "engine": "marker"
 }
 ```
+
+`engine` 標示實際用了哪條路：`marker`（OCR）、`fastdoc`（純文字層抽取）、
+或 `dual`（兩種都跑）。`dual` 時會多出 `fastdoc_markdown`、`fastdoc_time`、`marker_time`。
+
+---
+
+## 存取控制與資源上限
+
+這些預設值可以直接跑，但對外開放前請一併調整。完整清單見 `.env.example`。
+
+| 變數 | 預設 | 說明 |
+|------|------|------|
+| `API_KEY` | 空（不驗證） | 設了之後所有 `/api/*` 都要帶 `X-API-Key` header；`/api/health` 永遠不驗證，否則容器健康檢查會失敗 |
+| `RATE_LIMIT_REQUESTS` | `60` | 每個 IP 在 `RATE_LIMIT_WINDOW` 秒內的請求上限，`0` = 關閉 |
+| `RATE_LIMIT_WINDOW` | `60` | 上面那個窗口的秒數 |
+| `MAX_BATCH_FILES` | `50` | 單一批次最多幾個檔 |
+| `MAX_UNCOMPRESSED_SIZE` | `200MB` | docx/xlsx/pptx 解壓後的上限（壓縮炸彈防護） |
+| `MARKER_CONCURRENCY` | `1` | 同時能有幾份文件進 Marker；Marker 佔著 GPU，預設序列化 |
+| `WORKER_THREADS` | `4` | 品質檢查 / fastdoc / 檔案寫入用的 thread 數 |
+
+帶 API key 的呼叫方式：
+
+```bash
+curl -X POST http://localhost/api/upload \
+  -H "X-API-Key: <你的金鑰>" \
+  -F "file=@document.pdf"
+```
+
+nginx 那層另外有 `limit_req` / `limit_conn`（2 req/s、burst 20、每 IP 8 條連線）
+與 `client_max_body_size 300M`。**300M 是跟著 `MAX_BATCH_FILES` 走的**——
+調大批次上限時，`nginx.allinone.conf` 也要一起改。
+
+> 前端呼叫 API 一律用相對路徑 `/api/*`，dev 由 vite proxy 轉、prod 由 nginx 轉。
+> 除非後端真的在別的 origin，否則**不要**設 `VITE_API_BASE_URL`——寫死絕對網址
+> 會讓區網使用者的瀏覽器去打他自己的 localhost。
 
 ---
 

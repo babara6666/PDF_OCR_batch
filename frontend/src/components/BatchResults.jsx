@@ -12,27 +12,55 @@ const BatchResults = ({ results, onNewUpload }) => {
 
   const [selectedIdx, setSelectedIdx] = useState(results.findIndex((r) => r.success));
   const [viewMode, setViewMode] = useState("preview");
+  const [engine, setEngine] = useState("marker");
 
   const current = results[selectedIdx] ?? null;
 
+  // Dual results carry a second rendering of the same document: Marker's
+  // reconstructed layout in markdown_content, the verbatim text layer in
+  // fastdoc_markdown.
+  const hasDual = Boolean(current?.fastdoc_markdown);
+  const shownMarkdown =
+    hasDual && engine === "fastdoc"
+      ? current.fastdoc_markdown
+      : (current?.markdown_content ?? "");
+
   const handleCopy = (md) => navigator.clipboard.writeText(md);
 
-  const handleDownloadSingle = (result) => {
-    const blob = new Blob([result.markdown_content], { type: "text/markdown" });
+  const base = (name) => name.replace(/\.[^.]+$/, "");
+
+  const download = (text, filename) => {
+    const blob = new Blob([text], { type: "text/markdown" });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
     a.href     = url;
-    a.download = result.filename.replace(/\.[^.]+$/, ".md");
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
+  // Downloading only the visible engine would silently drop half of a dual
+  // result, so each engine gets its own suffixed file.
+  const handleDownloadSingle = (result) => {
+    if (result.fastdoc_markdown) {
+      download(result.markdown_content, `${base(result.filename)}.marker.md`);
+      download(result.fastdoc_markdown, `${base(result.filename)}.fastdoc.md`);
+      return;
+    }
+    download(result.markdown_content, `${base(result.filename)}.md`);
+  };
+
   const handleDownloadAll = async () => {
     const zip = new JSZip();
     succeeded.forEach((r) => {
-      zip.file(r.filename.replace(/\.[^.]+$/, ".md"), r.markdown_content);
+      if (r.fastdoc_markdown) {
+        zip.file(`${base(r.filename)}.marker.md`, r.markdown_content);
+        zip.file(`${base(r.filename)}.fastdoc.md`, r.fastdoc_markdown);
+      } else {
+        zip.file(`${base(r.filename)}.md`, r.markdown_content);
+      }
     });
     const blob = await zip.generateAsync({ type: "blob" });
     saveAs(blob, "ocr_results.zip");
@@ -101,6 +129,27 @@ const BatchResults = ({ results, onNewUpload }) => {
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
+                  {hasDual && (
+                    <div className="flex h-8 items-center rounded-full bg-surface-container-high dark:bg-[#2a2a2a] p-0.5">
+                      {[
+                        { id: "marker",  label: t.engineMarker,  time: current.marker_time },
+                        { id: "fastdoc", label: t.engineFastdoc, time: current.fastdoc_time },
+                      ].map(({ id, label, time }) => (
+                        <button
+                          key={id}
+                          onClick={() => setEngine(id)}
+                          title={time ? `${time.toFixed(2)}s` : undefined}
+                          className={`h-full px-3 rounded-full text-xs font-label font-medium transition-all ${
+                            engine === id
+                              ? "bg-surface dark:bg-[#131313] text-primary dark:text-[#dcc497] shadow-sm"
+                              : "text-on-surface-variant dark:text-[#cfc5b7]"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex h-8 items-center rounded-full bg-surface-container-high dark:bg-[#2a2a2a] p-0.5">
                     {["preview", "raw"].map((v) => (
                       <button
@@ -117,7 +166,7 @@ const BatchResults = ({ results, onNewUpload }) => {
                     ))}
                   </div>
                   <button
-                    onClick={() => handleCopy(current.markdown_content)}
+                    onClick={() => handleCopy(shownMarkdown)}
                     className="p-2 hover:bg-surface-container-highest dark:hover:bg-[#353534] rounded-full transition-all text-on-surface-variant dark:text-[#cfc5b7]"
                     title="Copy to clipboard"
                   >
@@ -137,11 +186,11 @@ const BatchResults = ({ results, onNewUpload }) => {
               <div className="flex-1 overflow-y-auto p-8 md:p-10 bg-surface-container-lowest dark:bg-[#0e0e0e]/50 custom-scrollbar">
                 {viewMode === "preview" ? (
                   <div className="font-headline leading-relaxed text-on-surface-variant dark:text-[#cfc5b7] space-y-4 prose prose-sm max-w-none dark:prose-invert prose-headings:font-headline prose-headings:text-on-surface dark:prose-headings:text-[#e5e2e1] prose-a:text-primary dark:prose-a:text-[#dcc497]">
-                    <ReactMarkdown>{current.markdown_content}</ReactMarkdown>
+                    <ReactMarkdown>{shownMarkdown}</ReactMarkdown>
                   </div>
                 ) : (
                   <pre className="text-sm font-mono text-on-surface dark:text-[#e5e2e1] whitespace-pre-wrap leading-relaxed">
-                    {current.markdown_content}
+                    {shownMarkdown}
                   </pre>
                 )}
               </div>
