@@ -54,6 +54,15 @@ services:
       # fight over VRAM. Raise only if the card has headroom to spare.
       MARKER_CONCURRENCY: "1"
 
+      # ── fastdoc fast path ──────────────────────────────────────────────
+      # Master switch. Off means try_fast_path() returns None for every file
+      # and Marker handles everything — which also makes the UI's dual-output
+      # toggle a no-op, so leave this on if you want either feature.
+      FASTDOC_ROUTING: "${FASTDOC_ROUTING:-1}"
+      # Default for dual output when a request does not pass ?dual=. The UI
+      # toggle overrides this per request; it needs FASTDOC_ROUTING=1 either way.
+      FASTDOC_DUAL: "${FASTDOC_DUAL:-1}"
+
       # ── Access control ─────────────────────────────────────────────────
       # Set API_KEY to require an `X-API-Key` header on every /api/* call
       # (/api/health stays open so this healthcheck keeps working). Unset

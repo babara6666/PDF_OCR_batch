@@ -32,9 +32,9 @@ export default {
         "error-container":           "#F9DEDC",
       },
       fontFamily: {
-        "headline": ["Noto Serif JP", "serif"],
-        "body":     ["Manrope", "sans-serif"],
-        "label":    ["Manrope", "sans-serif"],
+        "headline": ["Noto Serif JP Variable", "Noto Serif JP", "serif"],
+        "body":     ["Manrope Variable", "Manrope", "sans-serif"],
+        "label":    ["Manrope Variable", "Manrope", "sans-serif"],
         "mono":     ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
     },
