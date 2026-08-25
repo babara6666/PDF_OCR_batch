@@ -9,6 +9,7 @@ import LicensePage from "./components/LicensePage";
 import OperationWarning from "./components/OperationWarning";
 import { uploadBatch, extractNotesBatch, checkQualityBatch } from "./services/api";
 import { useT } from "./i18n/index.jsx";
+import { NOTES_ENABLED } from "./config";
 
 // Default quality thresholds (must match backend/quality_checker.py)
 const DEFAULT_THRESHOLDS = {
@@ -207,7 +208,9 @@ function App() {
 
         {/* Mode navigation (sliding toggle) */}
         <nav className="flex-1 flex flex-col gap-1 px-2">
-          <ModeToggle mode={mode} onChange={handleModeChange} className="mx-2 mb-3" />
+          {NOTES_ENABLED && (
+            <ModeToggle mode={mode} onChange={handleModeChange} className="mx-2 mb-3" />
+          )}
 
           {isQualityChecking && (
             <div className="flex items-center gap-3 rounded-full mx-2 px-4 py-3 bg-primary/10 dark:bg-[#dcc497]/10 text-primary dark:text-[#dcc497] text-sm font-bold">
@@ -253,13 +256,6 @@ function App() {
 
         {/* Footer */}
         <div className="px-2 pt-4 border-t border-outline-variant dark:border-[#4c463c]">
-          <a
-            href="#"
-            className="flex items-center gap-3 rounded-full mx-2 px-4 py-2.5 text-sm text-on-surface-variant dark:text-[#cfc5b7] hover:bg-surface-container-high dark:hover:bg-[#2a2a2a] transition-colors"
-          >
-            <span className="material-symbols-outlined text-[18px]">help_outline</span>
-            <span className="font-label">{t.support}</span>
-          </a>
           <button
             onClick={() => setActivePage("license")}
             className={`w-full flex items-center gap-3 rounded-full mx-2 px-4 py-2.5 text-sm transition-colors ${
@@ -418,19 +414,23 @@ function App() {
         </main>
       </div>
 
-      {/* ── Mobile bottom nav ───────────────────────────────────────────────────── */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface-container-low dark:bg-[#1c1b1b] py-3 px-6 flex items-center gap-3 z-50 rounded-t-3xl border-t border-outline-variant dark:border-[#4c463c] shadow-2xl">
-        <ModeToggle mode={mode} onChange={handleModeChange} className="flex-1" />
-        {results && (
-          <button
-            onClick={handleNewUpload}
-            className="flex flex-col items-center gap-1 text-secondary dark:text-[#c6c6c6]"
-          >
-            <span className="material-symbols-outlined">add_circle</span>
-            <span className="text-[10px] font-label">{t.newBatch}</span>
-          </button>
-        )}
-      </nav>
+      {/* ── Mobile bottom nav (hidden when it would be empty) ──────────────────── */}
+      {(NOTES_ENABLED || results) && (
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface-container-low dark:bg-[#1c1b1b] py-3 px-6 flex items-center gap-3 z-50 rounded-t-3xl border-t border-outline-variant dark:border-[#4c463c] shadow-2xl">
+          {NOTES_ENABLED && (
+            <ModeToggle mode={mode} onChange={handleModeChange} className="flex-1" />
+          )}
+          {results && (
+            <button
+              onClick={handleNewUpload}
+              className="flex flex-col items-center gap-1 text-secondary dark:text-[#c6c6c6]"
+            >
+              <span className="material-symbols-outlined">add_circle</span>
+              <span className="text-[10px] font-label">{t.newBatch}</span>
+            </button>
+          )}
+        </nav>
+      )}
 
       {/* ── System licensing warning (first use) ────────────────────────────────── */}
       <OperationWarning

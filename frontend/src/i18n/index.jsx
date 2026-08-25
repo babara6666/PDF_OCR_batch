@@ -24,7 +24,6 @@ export const translations = {
     reviewing:      "Review",
     batchComplete:  "Batch Complete",
     newBatch:       "New Batch",
-    support:        "Support",
     checkingNav:    "Checking…",
 
     // Header toggle
@@ -161,10 +160,8 @@ export const translations = {
     licenseColNote:       "Note",
     tierPaid:             "Commercial: paid / licensed",
     tierFree:             "Free",
-    tierModel:            "Depends on model",
     tierPaidDesc:         "For commercial use, license fees may arise under each vendor's license terms — proceed per your actual contract.",
     tierFreeDesc:         "Open-source licenses (MIT / Apache-2.0 / BSD, etc.): free to use, but you must still comply with the license terms.",
-    tierModelDesc:        "License and fee depend on the model weights your organization actually chooses; confirm separately.",
     licenseLegendTitle:   "Commercial-fee categories",
     licenseFootnote:      "The full license terms of each component are governed by its official LICENSE file.",
     licenseGroupFrontend: "Frontend / App libraries",
@@ -207,7 +204,6 @@ export const translations = {
     reviewing:      "品質審核",
     batchComplete:  "批次完成",
     newBatch:       "新批次",
-    support:        "支援",
     checkingNav:    "檢查中…",
 
     // Header toggle
@@ -344,10 +340,8 @@ export const translations = {
     licenseColNote:       "備註",
     tierPaid:             "商用需付費／授權",
     tierFree:             "免費",
-    tierModel:            "依模型而定",
     tierPaidDesc:         "於商業使用時可能依各供應商之授權條款產生授權費用，請依實際合約辦理。",
     tierFreeDesc:         "為開源授權（MIT／Apache-2.0／BSD 等），可免費使用但仍須遵守其授權條款。",
-    tierModelDesc:        "其授權與費用取決於貴單位實際選用之模型權重，須另行確認。",
     licenseLegendTitle:   "商用付費分類說明",
     licenseFootnote:      "各元件之完整授權條款以其官方 LICENSE 檔為準。",
     licenseGroupFrontend: "前端／應用框架",

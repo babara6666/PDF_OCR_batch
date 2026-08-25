@@ -3,8 +3,7 @@ import { useT } from "../i18n/index.jsx";
 // ── Commercial-fee tiers ──────────────────────────────────────────────────────
 //   paid  → 商用需付費／授權   (amber)
 //   free  → 免費              (green)
-//   model → 依模型而定         (blue)
-const TIER = { PAID: "paid", FREE: "free", MODEL: "model" };
+const TIER = { PAID: "paid", FREE: "free" };
 
 // Component inventory. Versions reflect the pinned/bundled build; full terms are
 // governed by each component's official LICENSE file (see footnote).
@@ -69,11 +68,6 @@ const GROUPS = [
         version: "自訓 / self-trained", license: "AGPL-3.0 (base)", tier: TIER.PAID,
         note: "自行訓練，衍生自 Ultralytics YOLOv8（AGPL-3.0）；商用授權依 Ultralytics。 · Self-trained on Ultralytics YOLOv8 (AGPL-3.0).",
       },
-      {
-        name: "雲端 LLM 模型（選用：Gemini / Claude / GPT）",
-        version: "—", license: "SDK: Apache-2.0 / MIT", tier: TIER.MODEL,
-        note: "僅在啟用 LLM 加值功能時使用；API 服務按所選模型用量計費。 · Only when optional LLM features are enabled; API billed per chosen model.",
-      },
     ],
   },
 ];
@@ -81,7 +75,6 @@ const GROUPS = [
 const tierStyles = {
   paid:  "bg-error-container text-error dark:bg-[#93000a]/30 dark:text-[#ffb4ab] border-error/30",
   free:  "bg-primary/10 text-primary dark:bg-[#8D9965]/15 dark:text-[#b7c48c] border-primary/20",
-  model: "bg-tertiary/10 text-tertiary dark:bg-[#dcc497]/15 dark:text-[#dcc497] border-tertiary/25",
 };
 
 const TierBadge = ({ tier, label }) => (
@@ -92,12 +85,11 @@ const TierBadge = ({ tier, label }) => (
 
 const LicensePage = ({ onBack }) => {
   const { t } = useT();
-  const tierLabel = { paid: t.tierPaid, free: t.tierFree, model: t.tierModel };
+  const tierLabel = { paid: t.tierPaid, free: t.tierFree };
 
   const legend = [
     { tier: TIER.PAID,  label: t.tierPaid,  desc: t.tierPaidDesc },
     { tier: TIER.FREE,  label: t.tierFree,  desc: t.tierFreeDesc },
-    { tier: TIER.MODEL, label: t.tierModel, desc: t.tierModelDesc },
   ];
 
   return (
