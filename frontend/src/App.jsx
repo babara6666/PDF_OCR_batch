@@ -3,13 +3,30 @@ import UploadForm from "./components/UploadForm";
 import ProcessingStatus from "./components/ProcessingStatus";
 import BatchResults from "./components/BatchResults";
 import NotesResults from "./components/NotesResults";
+import ErpResults from "./components/ErpResults";
 import QualityReview from "./components/QualityReview";
 import ModeToggle from "./components/ModeToggle";
 import LicensePage from "./components/LicensePage";
 import OperationWarning from "./components/OperationWarning";
-import { uploadBatch, extractNotesBatch, checkQualityBatch } from "./services/api";
+import {
+  uploadBatch,
+  extractNotesBatch,
+  checkQualityBatch,
+  stageErpJobs,
+} from "./services/api";
 import { useT } from "./i18n/index.jsx";
-import { NOTES_ENABLED } from "./config";
+import { NOTES_ENABLED, ERP_ENABLED } from "./config";
+
+// Groups the files of one upload so the ERP view can ask the backend for
+// "this batch" instead of tracking ids by hand.
+//
+// crypto.randomUUID() only exists in a secure context — over plain http on a
+// LAN IP (how this app is actually reached in the plant) it is undefined, so
+// it cannot be the only path.
+const newBatchId = () => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+};
 
 // Default quality thresholds (must match backend/quality_checker.py)
 const DEFAULT_THRESHOLDS = {
@@ -76,6 +93,9 @@ function App() {
   const [progress, setProgress]           = useState(0);
   const [results, setResults]             = useState(null);
   const [error, setError]                 = useState(null);
+  // Set once the OCR'd files have been staged as ERP jobs; switches the view
+  // over to the 知識通 queue.
+  const [erpBatchId, setErpBatchId]       = useState(null);
   // Dual output: run Marker and the text-layer extractor on the same file.
   const [dualMode, setDualMode]           = useState(
     () => localStorage.getItem("dualMode") === "1",
@@ -96,6 +116,7 @@ function App() {
     setProgress(0);
     setResults(null);
     setError(null);
+    setErpBatchId(null);
   };
 
   // ── File selection ───────────────────────────────────────────────────────────
@@ -160,13 +181,36 @@ function App() {
 
     try {
       let response;
-      if (mode === "ocr") {
-        response = await uploadBatch(filesToProcess, onUpload, force, dualMode);
-      } else {
+      if (mode === "notes") {
         response = await extractNotesBatch(filesToProcess, true, onUpload);
+      } else {
+        // ocr and erp run the identical front half — same engines, same
+        // quality gate. Only what happens to the markdown afterwards differs.
+        response = await uploadBatch(filesToProcess, onUpload, force, dualMode);
       }
 
       clearInterval(simTimer);
+
+      if (mode === "erp") {
+        const batchId = newBatchId();
+        await stageErpJobs(
+          response.results.map((r) => ({
+            filename: r.filename,
+            markdown: r.markdown_content || "",
+            engine: r.engine || "",
+            // Dual mode returns the same document twice. markdown_content is
+            // Marker's layout reconstruction; fastdoc_markdown is the file's
+            // own text layer copied verbatim. Both go over, so the mapper can
+            // read structure from one and check digits against the other.
+            alt_markdown: r.fastdoc_markdown || "",
+            alt_engine: r.fastdoc_markdown ? "fastdoc" : "",
+            error: r.success ? "" : r.error || "",
+          })),
+          batchId,
+        );
+        setErpBatchId(batchId);
+      }
+
       setProgress(100);
       await new Promise((r) => setTimeout(r, 400));
       setResults(response.results);
@@ -186,6 +230,7 @@ function App() {
     setProgress(0);
     setError(null);
     setIsProcessing(false);
+    setErpBatchId(null);
   };
 
   // ─── Render ──────────────────────────────────────────────────────────────────
@@ -208,9 +253,7 @@ function App() {
 
         {/* Mode navigation (sliding toggle) */}
         <nav className="flex-1 flex flex-col gap-1 px-2">
-          {NOTES_ENABLED && (
-            <ModeToggle mode={mode} onChange={handleModeChange} className="mx-2 mb-3" />
-          )}
+          <ModeToggle mode={mode} onChange={handleModeChange} className="mx-2 mb-3" />
 
           {isQualityChecking && (
             <div className="flex items-center gap-3 rounded-full mx-2 px-4 py-3 bg-primary/10 dark:bg-[#dcc497]/10 text-primary dark:text-[#dcc497] text-sm font-bold">
@@ -286,7 +329,7 @@ function App() {
             {/* Desktop breadcrumb */}
             <nav className="hidden md:flex items-center gap-8 font-label text-sm uppercase tracking-widest">
               <span className="text-primary dark:text-[#dcc497] font-bold border-b-2 border-tertiary dark:border-[#dcc497] pb-0.5">
-                {mode === "ocr" ? t.modeOcr : t.modeNotes}
+                {mode === "notes" ? t.modeNotes : mode === "erp" ? t.modeErp : t.modeOcr}
               </span>
             </nav>
           </div>
@@ -321,7 +364,7 @@ function App() {
             {/* Quick-action upload button */}
             {!isProcessing && !isQualityChecking && !qualityData && !results && selectedFiles.length > 0 && (
               <button
-                onClick={mode === "ocr" ? handleQualityCheck : () => handleUpload()}
+                onClick={mode === "notes" ? () => handleUpload() : handleQualityCheck}
                 className="px-5 py-2 bg-primary dark:bg-[#dcc497] text-on-primary dark:text-[#3d2e0e] rounded-full font-label font-semibold text-sm hover:opacity-90 transition-all shadow-sm"
               >
                 {mode === "notes"
@@ -355,7 +398,7 @@ function App() {
               onFilesSelect={handleFilesSelect}
               selectedFiles={selectedFiles}
               onRemoveFile={handleRemoveFile}
-              onUpload={mode === "ocr" ? handleQualityCheck : () => handleUpload()}
+              onUpload={mode === "notes" ? () => handleUpload() : handleQualityCheck}
               isProcessing={isProcessing}
               mode={mode}
               thresholds={thresholds}
@@ -409,17 +452,19 @@ function App() {
           {!isProcessing && results && mode === "notes" && (
             <NotesResults results={results} onNewUpload={handleNewUpload} />
           )}
+
+          {!isProcessing && erpBatchId && mode === "erp" && (
+            <ErpResults batchId={erpBatchId} onNewUpload={handleNewUpload} />
+          )}
           </>
           )}
         </main>
       </div>
 
       {/* ── Mobile bottom nav (hidden when it would be empty) ──────────────────── */}
-      {(NOTES_ENABLED || results) && (
+      {(NOTES_ENABLED || ERP_ENABLED || results) && (
         <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface-container-low dark:bg-[#1c1b1b] py-3 px-6 flex items-center gap-3 z-50 rounded-t-3xl border-t border-outline-variant dark:border-[#4c463c] shadow-2xl">
-          {NOTES_ENABLED && (
-            <ModeToggle mode={mode} onChange={handleModeChange} className="flex-1" />
-          )}
+          <ModeToggle mode={mode} onChange={handleModeChange} className="flex-1" />
           {results && (
             <button
               onClick={handleNewUpload}

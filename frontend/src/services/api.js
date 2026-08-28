@@ -207,4 +207,118 @@ export const checkHealth = async () => {
   }
 };
 
+
+// ─── ERP import mode ──────────────────────────────────────────────────────────
+// These talk JSON, not multipart — the shared `api` instance sets a
+// multipart Content-Type, so each call overrides it.
+const JSON_HEADERS = { headers: { "Content-Type": "application/json" } };
+
+const erpError = (error, fallback) => {
+  if (error.response) {
+    return new Error(
+      error.response.data?.detail || error.response.data?.error || fallback,
+    );
+  }
+  if (error.request) {
+    return new Error("No response from server. Is the backend running?");
+  }
+  return new Error(error.message || fallback);
+};
+
+/**
+ * Stage OCR'd documents for 知識通 to map.
+ * @param {Array<{filename: string, markdown: string, engine?: string, error?: string}>} documents
+ * @param {string} batchId - groups the files uploaded together
+ * @returns {Promise<{jobs: Array}>}
+ */
+export const stageErpJobs = async (documents, batchId) => {
+  try {
+    const response = await api.post(
+      "/api/erp/jobs",
+      { documents, batch_id: batchId },
+      JSON_HEADERS,
+    );
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to stage documents for ERP import");
+  }
+};
+
+/**
+ * List staged jobs, newest first.
+ * @param {{status?: string, batchId?: string}} opts
+ */
+export const listErpJobs = async ({ status, batchId } = {}) => {
+  try {
+    const params = {};
+    if (status) params.status = status;
+    if (batchId) params.batch_id = batchId;
+    const response = await api.get("/api/erp/jobs", { params });
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to list ERP jobs");
+  }
+};
+
+/** Full job: metadata, mapped rows, and (optionally) the source markdown. */
+export const getErpJob = async (jobId, { includeMarkdown = false } = {}) => {
+  try {
+    const response = await api.get(`/api/erp/jobs/${jobId}`, {
+      params: { include_markdown: includeMarkdown },
+    });
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to load ERP job");
+  }
+};
+
+/**
+ * Overwrite a job's rows — used when a human corrects what 知識通 returned.
+ * @returns {Promise} the stored rows plus any warnings the backend raised
+ */
+export const putErpRows = async (jobId, rows, { mappedBy = "人工覆核", notes = "" } = {}) => {
+  try {
+    const response = await api.put(
+      `/api/erp/jobs/${jobId}/rows`,
+      { rows, mapped_by: mappedBy, notes },
+      JSON_HEADERS,
+    );
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to save rows");
+  }
+};
+
+export const deleteErpJob = async (jobId) => {
+  try {
+    const response = await api.delete(`/api/erp/jobs/${jobId}`);
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to discard job");
+  }
+};
+
+/** The ERP column definition + supplier alias list. */
+export const getErpSchema = async () => {
+  try {
+    const response = await api.get("/api/erp/schema");
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to load ERP schema");
+  }
+};
+
+/**
+ * URL of the ERP import file. Returned as a URL rather than fetched, so the
+ * browser downloads it directly and the Content-Disposition filename (which
+ * carries the Chinese name) survives.
+ */
+export const erpExportUrl = (jobIds, fmt = "xlsx") => {
+  const ids = Array.isArray(jobIds) ? jobIds : [jobIds];
+  if (ids.length === 1 && fmt === "xlsx") {
+    return `${API_BASE_URL}/api/erp/jobs/${ids[0]}/export.xlsx`;
+  }
+  return `${API_BASE_URL}/api/erp/export.${fmt}?job_ids=${ids.join(",")}`;
+};
+
 export default api;

@@ -35,6 +35,7 @@ from quality_checker import check_document_quality  # noqa: E402
 from yolo_detector import YOLONotesDetector  # noqa: E402
 
 import fastdoc  # noqa: E402
+import erp  # noqa: E402
 from fastdoc.detect import detect_bytes  # noqa: E402
 from fastdoc.router import SUPPORTED as FASTDOC_FORMATS  # noqa: E402
 
@@ -557,6 +558,11 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(ApiKeyMiddleware)
 
+# ERP import mode. Self-contained: /api/erp/* stages OCR'd markdown, takes the
+# normalised rows back from 知識通 over MCP, and exports the ERP import file.
+# Sits behind the same API-key/rate-limit middleware as every other /api route.
+app.include_router(erp.router)
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -586,6 +592,9 @@ async def root():
             "extract_notes": "/api/extract-notes",
             "extract_notes_batch": "/api/extract-notes-batch",
             "yolo_status": "/api/yolo-status",
+            "erp_jobs": "/api/erp/jobs",
+            "erp_schema": "/api/erp/schema",
+            "erp_export": "/api/erp/export.xlsx",
             "health": "/api/health",
         },
     }

@@ -31,6 +31,8 @@ frontend/.env
 # ── Large runtime data (not needed in image) ──────────────────────────────────
 Anacondaenvspdf_ocr_opdata/
 backend/uploads/
+backend/erp_jobs/
+mcp_server/.env
 data/
 static/
 

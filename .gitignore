@@ -12,6 +12,10 @@ temp/
 # Local planning docs
 *.md
 !README.md
+# ...but the MCP server's reference docs are product, not planning notes: the
+# skill file gets uploaded to 知識通, and the other two are served as MCP
+# resources. Without this they vanish from the repo and the server ships broken.
+!mcp_server/reference/*.md
 
 private.py
 .DS_Store
@@ -202,6 +206,12 @@ frontend/.env.local
 
 # Backend uploads
 backend/uploads/
+
+# Staged ERP jobs — customer inspection data, written at runtime.
+backend/erp_jobs/
+
+# MCP server secrets (the .env.example is committed, the .env is not).
+mcp_server/.env
 backend/conversion_results/
 backend/temp/
 backend/.env

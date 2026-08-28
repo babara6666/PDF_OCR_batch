@@ -1,0 +1,12 @@
+# specocr_mcp depends on the MCP SDK (which brings starlette) plus httpx,
+# which it uses directly to talk to the backend. Do NOT rely on the SDK to
+# pull httpx in — recent versions do not.
+# Keep this in its OWN environment, separate from the backend — the backend
+# pins an older starlette (FastAPI + marker) while the MCP SDK needs a newer one.
+# 2.x renamed FastMCP -> MCPServer and moved host/port to run(); this file
+# is written against 2.x. Do not relax to <2 without editing specocr_mcp.py.
+mcp>=2.0
+httpx>=0.27.0
+# Optional: lets specocr_mcp.py read the .env next to it. Without it the server
+# still runs — you just have to export the variables yourself.
+python-dotenv>=1.0.0

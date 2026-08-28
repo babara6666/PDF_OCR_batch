@@ -11,6 +11,7 @@
 - 🔢 **數學公式**: 支援 LaTeX 數學公式提取
 - ⚡ **GPU 加速**: 支援 CUDA GPU 加速處理
 - 📦 **打包下載**: 批次轉換完成後自動整理與下載結果
+- 🏭 **ERP 匯入模式**: 供應商進料檢驗報告（COA）交給知識通做欄位對應，覆核後匯出 ERP 匯入檔（見下方「ERP 匯入模式」）
 
 ---
 
@@ -184,6 +185,12 @@ PDF_OCR_FS/
 │   ├── main.py               # FastAPI 主程式
 │   ├── quality_checker.py    # OCR 前品質檢查
 │   ├── notes_extractor.py    # 工程圖 Notes 區段提取
+│   ├── erp/                  # ERP 匯入模式（OCR → 知識通 → 匯入檔）
+│   │   ├── schema.yaml       #   7 個 ERP 欄位 + 供應商欄名別名（唯一事實來源）
+│   │   ├── schema.py         #   讀 schema、正規化知識通回填的列
+│   │   ├── store.py          #   檔案式 job 儲存（雙軌兩份 MD 都留，等知識通來拿）
+│   │   ├── export.py         #   產出 xlsx / csv 匯入檔
+│   │   └── routes.py         #   /api/erp/*
 │   ├── bench_fastdoc.py      # 快速路徑 vs Marker 的量測工具
 │   ├── fastdoc/              # 免模型快速路徑（anydoc 架構移植）
 │   │   ├── detect.py         #   1. 依內容判斷格式
@@ -199,9 +206,79 @@ PDF_OCR_FS/
 │   │   ├── components/
 │   │   └── services/api.js
 │   └── package.json
+├── mcp_server/               # 給知識通接的 MCP server（獨立環境）
+│   ├── specocr_mcp.py        #   erp_list_jobs / erp_get_markdown / erp_submit_rows …
+│   └── reference/            #   欄位定義、版型陷阱、要上傳到知識通的 skill
 ├── marker/                   # Marker OCR 核心模組
 └── pyproject.toml            # Marker 套件配置
 ```
+
+---
+
+## ERP 匯入模式（進料檢驗報告 → 知識通 → ERP）
+
+第三個分頁。前半段跟一般 OCR 完全一樣（同樣的引擎、同樣的品質檢查），
+差別在辨識完的 Markdown 不是直接給你下載，而是**暫存成待處理的 job**，
+由知識通讀懂內容、對應成 ERP 欄位後回填。
+
+```
+上傳 PDF ─► OCR ─► 暫存為 job ─┐
+                                │  MCP（知識通主動來拿）
+   ERP 匯入檔 ◄── 人工覆核 ◄─────┘
+```
+
+**為什麼要 LLM 而不是繼續寫規則**：每家供應商叫法都不同——
+`批號` / `Lot No.` / `L/C NO.` / `代工原料卷號` / `批号` 全是同一個東西，
+`檢驗結果` 有 37 種寫法。既有做法是人工維護的別名對照表用字串比對，
+38 份實測報告跑了三輪仍有一半出現「特殊規格 / 未抓到 / 辨識錯誤」，
+而且每來一個新供應商就要再補一次。改成讓知識通照語意判斷後，
+那份 163 筆的別名清單降級成**提示**，沒看過的欄名變成正常情況而不是失敗。
+
+輸出欄位固定 7 欄，與現行人工作業的 Excel 一致：
+
+```
+供應商批號 | 檢驗項目 | 單位 | 規格 | 規格上限 | 規格下限 | 檢驗結果
+```
+
+### 雙軌輸出怎麼交給知識通
+
+檔案帶有文字層時會跑雙軌，兩份輸出**都**存進 job，知識通一次拿到兩份：
+
+| | 內容 | 用途 |
+|---|---|---|
+| `markdown` | Marker 還原的版面 | 表格結構——判斷哪一欄是什麼 |
+| `alt_markdown` | fastdoc 直接抄的文字層 | 精確字元——數字、批號不會辨識錯 |
+
+兩份是**同一份文件**，所以 `erp_get_markdown` 會在開頭明講這件事再附上兩段。
+不講的話，讀到同一張表兩次會被當成兩份報告，列數直接變兩倍。
+
+值得多花這些 token 是因為兩者的失誤剛好互補：Marker 可能把 `24102102` 讀成
+`2410Z1O2`，但欄位分得對；fastdoc 抄來的字元不會錯，但版面是平的。
+結構看前者、數字看後者，覆核紀錄裡「辨識錯誤」那一類大多就消掉了。
+
+掃描件沒有文字層，只會有一份——那是正常情況，不是降級。
+
+### 啟用
+
+1. 依 `mcp_server/README.md` 架好 MCP server，把公開的 `https://…/mcp`
+   註冊到知識通。
+2. 把 `mcp_server/reference/zhishitong-skill-erp-import.md` 上傳成知識通的 skill。
+3. 把 `frontend/src/config.js` 的 `ERP_ENABLED` 改成 `true`，重建前端。
+
+預設是關的：沒有接上知識通的話，每份報告都會卡在「等待中」沒有辦法往下走。
+
+### 新增供應商欄名
+
+改 `backend/erp/schema.yaml` 對應欄位的 `aliases` 就好，存檔即生效
+（後端偵測 mtime 重讀，MCP server 也是即時取用），不需要重啟或重新部署。
+
+### 相關環境變數
+
+| 變數 | 預設 | 說明 |
+|---|---|---|
+| `ERP_JOBS_DIR` | `backend/erp_jobs` | 暫存 job 的位置 |
+| `ERP_JOBS_RETENTION_DAYS` | `14` | 超過就自動清掉（內含客戶檢驗資料） |
+| `ERP_JOBS_MAX` | `2000` | job 數量上限，超過從最舊的刪 |
 
 ---
 

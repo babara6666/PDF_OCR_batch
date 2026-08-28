@@ -78,7 +78,11 @@ const UploadForm = ({
           {t.uploadHeading}
         </h1>
         <p className="font-body text-on-surface-variant dark:text-[#cfc5b7] text-base leading-relaxed opacity-80 max-w-xl mx-auto">
-          {mode === "notes" ? t.uploadDescNotes : t.uploadDescOcr}
+          {mode === "notes"
+            ? t.uploadDescNotes
+            : mode === "erp"
+              ? t.erpUploadDesc
+              : t.uploadDescOcr}
         </p>
       </div>
 
@@ -218,7 +222,7 @@ const UploadForm = ({
             </div>
 
             {/* Threshold settings (OCR mode only) */}
-            {mode === "ocr" && (
+            {mode !== "notes" && (
               <div className="mt-4 relative z-10">
                 <button
                   onClick={() => setShowThresholds((v) => !v)}
@@ -316,7 +320,7 @@ const UploadForm = ({
         </div>
 
         {/* Dual output — only meaningful for the OCR pipeline */}
-        {mode === "ocr" && onDualModeChange && (
+        {mode !== "notes" && onDualModeChange && (
           <label
             className="flex items-center gap-2 cursor-pointer select-none ml-auto"
             title={t.dualModeHint}
