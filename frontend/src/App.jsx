@@ -1,9 +1,10 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import UploadForm from "./components/UploadForm";
 import ProcessingStatus from "./components/ProcessingStatus";
 import BatchResults from "./components/BatchResults";
 import NotesResults from "./components/NotesResults";
 import ErpResults from "./components/ErpResults";
+import ErpProfiles from "./components/ErpProfiles";
 import QualityReview from "./components/QualityReview";
 import ModeToggle from "./components/ModeToggle";
 import LicensePage from "./components/LicensePage";
@@ -13,6 +14,8 @@ import {
   extractNotesBatch,
   checkQualityBatch,
   stageErpJobs,
+  uploadErpSource,
+  listErpProfiles,
 } from "./services/api";
 import { useT } from "./i18n/index.jsx";
 import { NOTES_ENABLED, ERP_ENABLED } from "./config";
@@ -26,6 +29,25 @@ import { NOTES_ENABLED, ERP_ENABLED } from "./config";
 const newBatchId = () => {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+};
+
+// Send each staged job the PDF it was OCR'd from, so the review pane can show
+// the page beside the rows. Matched by filename because the backend returns
+// one job per document but makes no promise about ordering.
+//
+// One at a time: a 30-file batch fired at once is 100+ MB of concurrent
+// uploads competing with the poll that drives the same screen. Nothing awaits
+// this, and a rejected file is swallowed — the pane falls back to markdown.
+const attachErpSources = (jobs, files) => {
+  const byName = new Map(files.map((f) => [f.name, f]));
+  jobs.reduce(
+    (chain, job) =>
+      chain.then(() => {
+        const file = byName.get(job.filename);
+        return file ? uploadErpSource(job.job_id, file).catch(() => {}) : null;
+      }),
+    Promise.resolve(),
+  );
 };
 
 // Default quality thresholds (must match backend/quality_checker.py)
@@ -93,6 +115,11 @@ function App() {
   const [progress, setProgress]           = useState(0);
   const [results, setResults]             = useState(null);
   const [error, setError]                 = useState(null);
+  // Which customer's column set and aliases this upload is read under.
+  const [erpProfile, setErpProfile]       = useState("default");
+  const [erpProfiles, setErpProfiles]     = useState([{ id: "default", builtin: true }]);
+  const [showProfiles, setShowProfiles]   = useState(false);
+
   // Set once the OCR'd files have been staged as ERP jobs; switches the view
   // over to the 知識通 queue.
   const [erpBatchId, setErpBatchId]       = useState(null);
@@ -104,6 +131,19 @@ function App() {
   useEffect(() => {
     localStorage.setItem("dualMode", dualMode ? "1" : "0");
   }, [dualMode]);
+
+  // The customer profiles the deployment knows about. A backend without the
+  // endpoint (or one that is down) leaves the built-in entry in place, so the
+  // picker never empties and ERP mode keeps working exactly as before.
+  const loadErpProfiles = useCallback(() => {
+    listErpProfiles()
+      .then((d) => setErpProfiles(d.profiles?.length ? d.profiles : [{ id: "default", builtin: true }]))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (ERP_ENABLED) loadErpProfiles();
+  }, [loadErpProfiles]);
 
   // ── Mode switching ───────────────────────────────────────────────────────────
   const handleModeChange = (newMode) => {
@@ -193,7 +233,7 @@ function App() {
 
       if (mode === "erp") {
         const batchId = newBatchId();
-        await stageErpJobs(
+        const { jobs } = await stageErpJobs(
           response.results.map((r) => ({
             filename: r.filename,
             markdown: r.markdown_content || "",
@@ -207,8 +247,15 @@ function App() {
             error: r.success ? "" : r.error || "",
           })),
           batchId,
+          erpProfile,
         );
         setErpBatchId(batchId);
+        // The PDFs follow behind, deliberately unawaited. The review pane
+        // shows the page a row came from, but nothing downstream waits on it,
+        // and these are megabytes next to the markdown's kilobytes — holding
+        // the table back for them would be the wrong trade. A file that fails
+        // to attach loses its page view and nothing else.
+        attachErpSources(jobs, filesToProcess);
       }
 
       setProgress(100);
@@ -379,6 +426,14 @@ function App() {
         <main className="flex-1 overflow-y-auto custom-scrollbar">
           {activePage === "license" ? (
             <LicensePage onBack={() => setActivePage(null)} />
+          ) : showProfiles ? (
+            <ErpProfiles
+              onClose={() => setShowProfiles(false)}
+              onProfileSaved={(id) => {
+                setErpProfile(id);
+                loadErpProfiles();
+              }}
+            />
           ) : (
           <>
           {/* Error banner */}
@@ -389,6 +444,36 @@ function App() {
                 <span className="font-semibold text-sm">Error:</span>
                 <span className="text-sm">{error}</span>
               </div>
+            </div>
+          )}
+
+          {/* ── Customer profile picker (ERP mode) ───────────────────────────────
+              Which column set and alias list this upload is read under. Sits
+              above the drop zone because it has to be decided before the
+              files go anywhere — a batch staged under the wrong customer's
+              profile has to be re-uploaded, not re-tagged. */}
+          {mode === "erp" && !isProcessing && !erpBatchId && (
+            <div className="mx-6 md:mx-10 mt-6 flex flex-wrap items-center gap-3">
+              <span className="font-label text-xs uppercase tracking-widest text-on-surface-variant dark:text-[#cfc5b7] opacity-70">
+                {t.erpProfile}
+              </span>
+              <select
+                value={erpProfile}
+                onChange={(e) => setErpProfile(e.target.value)}
+                className="px-3 py-1.5 rounded-full border border-outline-variant dark:border-[#4c463c] bg-transparent text-xs font-label text-on-background dark:text-[#e5e2e1]"
+              >
+                {erpProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.builtin ? t.erpProfileDefault : p.name || p.id}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => setShowProfiles(true)}
+                className="px-4 py-1.5 rounded-full border border-outline-variant dark:border-[#4c463c] text-xs font-label hover:bg-surface-container-high dark:hover:bg-[#2a2a2a] transition-all"
+              >
+                {t.erpProfileManage}
+              </button>
             </div>
           )}
 

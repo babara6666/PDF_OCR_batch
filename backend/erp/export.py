@@ -80,8 +80,9 @@ def job_xlsx(job_id: str) -> tuple[bytes, str]:
     """One job → (xlsx bytes, filename). Same layout as the existing OUTPUT/*.xlsx."""
     meta = store.get_meta(job_id)
     rows = store.get_rows(job_id)
-    headers = schema.headers()
-    keys = schema.keys()
+    profile = meta.get("profile_id") or schema.DEFAULT_PROFILE
+    headers = schema.headers(profile)
+    keys = schema.keys(profile)
 
     wb = Workbook()
     ws = wb.active
@@ -103,10 +104,32 @@ def job_xlsx(job_id: str) -> tuple[bytes, str]:
 
 
 # ── Batch workbook ───────────────────────────────────────────────────────────
-def batch_xlsx(job_ids: list[str]) -> tuple[bytes, str]:
-    """Many jobs → one workbook: a combined sheet plus one sheet per file."""
-    headers = schema.headers()
-    keys = schema.keys()
+def _profile_of(job_ids: list[str]) -> str:
+    """The profile this workbook is written under — the first job's.
+
+    One workbook has one header row, so a batch spanning two customers cannot
+    be one file. The odd job out is listed on 未匯入 rather than silently
+    written under the wrong columns.
+    """
+    for job_id in job_ids:
+        try:
+            return store.get_meta(job_id).get("profile_id") or schema.DEFAULT_PROFILE
+        except store.JobNotFound:
+            continue
+    return schema.DEFAULT_PROFILE
+
+
+def batch_xlsx(job_ids: list[str], *, only_reviewed: bool = True) -> tuple[bytes, str]:
+    """Many jobs → one workbook: a combined sheet plus one sheet per file.
+
+    `only_reviewed` holds back anything a human has not signed off on. These
+    rows decide whether incoming material is accepted, so an unlooked-at
+    mapping must not reach ERP by default — but it is listed on the 未匯入
+    sheet, never silently dropped.
+    """
+    profile = _profile_of(job_ids)
+    headers = schema.headers(profile)
+    keys = schema.keys(profile)
 
     wb = Workbook()
     summary = wb.active
@@ -124,8 +147,17 @@ def batch_xlsx(job_ids: list[str]) -> tuple[bytes, str]:
             continue
         rows = store.get_rows(job_id)
         name = meta.get("filename") or job_id
+        if meta.get("kind", store.KIND_REPORT) != store.KIND_REPORT:
+            skipped.append((name, "這是設定檔的學習樣本，不匯出"))
+            continue
+        if (meta.get("profile_id") or schema.DEFAULT_PROFILE) != profile:
+            skipped.append((name, f"設定檔不同（{meta.get('profile_id')}），請分開匯出"))
+            continue
         if not rows:
             skipped.append((name, meta.get("error") or f"狀態：{meta.get('status')}"))
+            continue
+        if only_reviewed and not meta.get("reviewed_at"):
+            skipped.append((name, "尚未確認"))
             continue
 
         _append_rows(summary, rows, keys, prefix=[name])
@@ -154,21 +186,31 @@ def batch_xlsx(job_ids: list[str]) -> tuple[bytes, str]:
 
 
 # ── CSV ──────────────────────────────────────────────────────────────────────
-def batch_csv(job_ids: list[str]) -> tuple[bytes, str]:
+def batch_csv(job_ids: list[str], *, only_reviewed: bool = True) -> tuple[bytes, str]:
     """Many jobs → one CSV, UTF-8 **with BOM**.
 
     Excel on a zh-TW Windows box opens a BOM-less UTF-8 CSV as cp950 and turns
     every Chinese column name into mojibake, which is how these files get
     reported as "broken export".
+
+    CSV has nowhere to put a 未匯入 sheet, so an unreviewed job is simply
+    absent here. The UI states the count before offering the link.
     """
-    keys = schema.keys()
+    profile = _profile_of(job_ids)
+    keys = schema.keys(profile)
     buf = io.StringIO(newline="")
     w = csv.writer(buf)
-    w.writerow(["來源檔案", *schema.headers()])
+    w.writerow(["來源檔案", *schema.headers(profile)])
     for job_id in job_ids:
         try:
             meta = store.get_meta(job_id)
         except store.JobNotFound:
+            continue
+        if meta.get("kind", store.KIND_REPORT) != store.KIND_REPORT:
+            continue
+        if (meta.get("profile_id") or schema.DEFAULT_PROFILE) != profile:
+            continue
+        if only_reviewed and not meta.get("reviewed_at"):
             continue
         name = meta.get("filename") or job_id
         for row in store.get_rows(job_id):

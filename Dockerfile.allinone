@@ -28,8 +28,12 @@ RUN npm ci --frozen-lockfile
 
 COPY frontend/ ./
 
-# Relative URL: nginx proxies /api/* to uvicorn internally
-ARG VITE_API_BASE_URL=/
+# Relative URL: nginx proxies /api/* to uvicorn internally.
+# Do NOT use `/` as the value: Git Bash/MSYS rewrites a build-arg of `/`
+# to `C:/Program Files/Git/`, which axios then uses as baseURL and the
+# browser reports "Unsupported protocol C:". `same-origin` is stripped to
+# "" in frontend/src/services/api.js.
+ARG VITE_API_BASE_URL=same-origin
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 
 RUN npm run build
@@ -167,8 +171,18 @@ RUN mkdir -p \
         /var/log/supervisor \
     && chown -R app:app /app/backend/uploads /home/app /tmp/Ultralytics /models/torch
 
+# Surya computes RECOGNITION_RENDER_FONTS from its package path at import
+# time and ignores FONT_DIR. Without this link it tries to download GoNoto
+# from GitHub the first time recognition runs — which on an offline Linux
+# host looks like a mysterious fetch failure.
+RUN mkdir -p /usr/local/lib/python3.11/site-packages/static/fonts \
+    && ln -sf /models/fonts/GoNotoCurrent-Regular.ttf \
+        /usr/local/lib/python3.11/site-packages/static/fonts/GoNotoCurrent-Regular.ttf
+
 # Model caches & paths. MODEL_CACHE_DIR points Surya at the baked weights;
 # YOLO_MODEL_PATH / FONT_* point at the bundled files.
+# HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE so `docker run` (no compose) stays
+# offline too. ENVIRONMENT=production turns off uvicorn's WatchFiles reloader.
 ENV HF_HOME=/models \
     TORCH_HOME=/models/torch \
     MODEL_CACHE_DIR=/models/datalab \
@@ -176,6 +190,9 @@ ENV HF_HOME=/models \
     FONT_PATH=/models/fonts/GoNotoCurrent-Regular.ttf \
     YOLO_MODEL_PATH=/app/models/notes_best.pt \
     YOLO_CONFIG_DIR=/tmp/Ultralytics \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    ENVIRONMENT=production \
     MAX_BATCH_FILES=50 \
     HOST=0.0.0.0 \
     PORT=8001

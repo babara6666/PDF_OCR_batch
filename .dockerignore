@@ -32,6 +32,10 @@ frontend/.env
 Anacondaenvspdf_ocr_opdata/
 backend/uploads/
 backend/erp_jobs/
+# Learned customer profiles — one file per customer, created at runtime.
+# Customer data, and the deployment's own state: keep it out of the image
+# and out of git. Mount it as a volume beside erp_jobs.
+backend/erp/profiles/
 mcp_server/.env
 data/
 static/

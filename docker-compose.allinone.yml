@@ -31,7 +31,7 @@ services:
         # Bake the pre-downloaded models + font into the image (needs ./_bundle).
         BUNDLE_MODELS: "true"
         # Frontend calls the API relatively; nginx proxies /api/* internally.
-        VITE_API_BASE_URL: /
+        VITE_API_BASE_URL: same-origin
     image: printlens:allinone
     container_name: printlens
     restart: unless-stopped
@@ -40,6 +40,7 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "8001"
+      ENVIRONMENT: "production"
       # Models are baked in → stay fully offline, never reach the network.
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"

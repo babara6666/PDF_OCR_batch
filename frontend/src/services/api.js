@@ -8,7 +8,19 @@ import axios from "axios";
 // forwards /api/* to the backend. A hardcoded host would send every LAN
 // visitor's browser to its own localhost, where nothing is listening.
 // Only set VITE_API_BASE_URL when the API genuinely lives on another origin.
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+// "/" is what the all-in-one image bakes in ("same origin"). Treat it as
+// empty so template URLs become `/api/...` not `//api/...` (a protocol-relative
+// URL that the browser sends to host `api`).
+const _rawBase = import.meta.env.VITE_API_BASE_URL || "";
+const API_BASE_URL = (() => {
+  const v = String(_rawBase).trim();
+  // `same-origin` is the docker build-arg sentinel (a lone `/` is rewritten
+  // by Git Bash/MSYS to `C:/Program Files/Git/`, which axios then uses as
+  // baseURL and the browser throws "Unsupported protocol C:").
+  if (!v || v === "/" || v === "same-origin") return "";
+  if (/^[A-Za-z]:[\\/]/.test(v)) return "";
+  return v.replace(/\/$/, "");
+})();
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -231,11 +243,11 @@ const erpError = (error, fallback) => {
  * @param {string} batchId - groups the files uploaded together
  * @returns {Promise<{jobs: Array}>}
  */
-export const stageErpJobs = async (documents, batchId) => {
+export const stageErpJobs = async (documents, batchId, profileId = "default") => {
   try {
     const response = await api.post(
       "/api/erp/jobs",
-      { documents, batch_id: batchId },
+      { documents, batch_id: batchId, profile_id: profileId },
       JSON_HEADERS,
     );
     return response.data;
@@ -289,6 +301,46 @@ export const putErpRows = async (jobId, rows, { mappedBy = "人工覆核", notes
   }
 };
 
+/**
+ * Attach the original PDF to a staged job so the reviewer can see the page it
+ * came from. Sent after staging rather than with it: the markdown is a few KB
+ * and everything downstream waits on it, while the PDF is megabytes that
+ * nothing waits on. Failure is not fatal — the review pane falls back to the
+ * markdown — so callers treat a rejection as a missing pane, not an error.
+ */
+export const uploadErpSource = async (jobId, file) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const response = await api.post(`/api/erp/jobs/${jobId}/source`, formData);
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to attach the source PDF");
+  }
+};
+
+/**
+ * URL of one rendered page of a job's source PDF.
+ *
+ * An image, not the PDF: the app's CSP sets `object-src 'none'` and
+ * `frame-ancestors 'none'`, so an embedded PDF viewer is blocked even
+ * same-origin. `img-src 'self'` is open, so a rendered page just works.
+ */
+export const erpPageUrl = (jobId, pageNo, width = 1400) =>
+  `${API_BASE_URL}/api/erp/jobs/${jobId}/page/${pageNo}.png?w=${width}`;
+
+/** Record (or take back) a human's sign-off on a job's rows. */
+export const setErpReviewed = async (jobId, reviewed) => {
+  try {
+    const response = reviewed
+      ? await api.post(`/api/erp/jobs/${jobId}/review`)
+      : await api.delete(`/api/erp/jobs/${jobId}/review`);
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to update the review state");
+  }
+};
+
 export const deleteErpJob = async (jobId) => {
   try {
     const response = await api.delete(`/api/erp/jobs/${jobId}`);
@@ -298,13 +350,157 @@ export const deleteErpJob = async (jobId) => {
   }
 };
 
-/** The ERP column definition + supplier alias list. */
-export const getErpSchema = async () => {
+/**
+ * Which mapping engines this deployment can drive, and their models.
+ * Never fails on a down server — an unreachable Ollama or gateway comes back
+ * with the curated model list and an `error`, so the picker is never empty.
+ */
+export const getErpLlm = async () => {
   try {
-    const response = await api.get("/api/erp/schema");
+    const response = await api.get("/api/erp/llm");
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Failed to load the mapping engines");
+  }
+};
+
+/** Map one report and wait for it — the retry button on a failed job. */
+export const mapErpJob = async (jobId, { provider = "", model = "" } = {}) => {
+  try {
+    const response = await api.post(
+      `/api/erp/jobs/${jobId}/map`,
+      { provider, model },
+      JSON_HEADERS,
+    );
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Mapping failed");
+  }
+};
+
+/**
+ * Map the whole pending queue in the background. Returns as soon as the work
+ * is queued; the 5s poll on the results page reports progress.
+ */
+export const mapErpBatch = async ({ batchId = "", provider = "", model = "" } = {}) => {
+  try {
+    const response = await api.post(
+      "/api/erp/map",
+      { batch_id: batchId, provider, model },
+      JSON_HEADERS,
+    );
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Mapping failed");
+  }
+};
+
+/** The ERP column definition + supplier alias list, for one customer profile. */
+export const getErpSchema = async (profile = "default") => {
+  try {
+    const response = await api.get("/api/erp/schema", { params: { profile } });
     return response.data;
   } catch (error) {
     throw erpError(error, "Failed to load ERP schema");
+  }
+};
+
+// ─── Customer profiles ────────────────────────────────────────────────────────
+// One profile = one customer's ERP columns plus what their suppliers call those
+// things. `default` is the built-in one and is read-only.
+
+export const listErpProfiles = async () => {
+  try {
+    return (await api.get("/api/erp/profiles")).data;
+  } catch (error) {
+    throw erpError(error, "Failed to list profiles");
+  }
+};
+
+export const getErpProfile = async (profile) => {
+  try {
+    return (await api.get(`/api/erp/profiles/${profile}`)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to load the profile");
+  }
+};
+
+export const saveErpProfile = async (profile, body) => {
+  try {
+    return (await api.put(`/api/erp/profiles/${profile}`, body, JSON_HEADERS)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to save the profile");
+  }
+};
+
+export const deleteErpProfile = async (profile) => {
+  try {
+    return (await api.delete(`/api/erp/profiles/${profile}`)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to delete the profile");
+  }
+};
+
+/**
+ * Read the customer's own alias table (their key.xlsx) into a draft.
+ * No model involved — the sheet already *is* the mapping.
+ */
+export const importErpAliasTable = async (profile, file) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    return (await api.post(`/api/erp/profiles/${profile}/alias-table`, formData)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to read the alias table");
+  }
+};
+
+export const listErpSamples = async (profile) => {
+  try {
+    return (await api.get(`/api/erp/profiles/${profile}/samples`)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to list samples");
+  }
+};
+
+/** Stage OCR'd reports as learning material. Same shape as stageErpJobs. */
+export const addErpSamples = async (profile, documents) => {
+  try {
+    return (await api.post(`/api/erp/profiles/${profile}/samples`, { documents }, JSON_HEADERS))
+      .data;
+  } catch (error) {
+    throw erpError(error, "Failed to add samples");
+  }
+};
+
+/** Attach the workbook the customer already filled in for one sample. */
+export const uploadErpExpected = async (jobId, file) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    return (await api.post(`/api/erp/jobs/${jobId}/expected`, formData)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to read the answer workbook");
+  }
+};
+
+/** Generalise the staged samples into a column draft. Saves nothing. */
+export const draftErpProfile = async (profile, { provider = "", model = "" } = {}) => {
+  try {
+    return (
+      await api.post(`/api/erp/profiles/${profile}/draft`, { provider, model }, JSON_HEADERS)
+    ).data;
+  } catch (error) {
+    throw erpError(error, "Failed to draft the profile");
+  }
+};
+
+/** Keep a report a human just reviewed as a learning sample for its profile. */
+export const teachFromErpJob = async (jobId) => {
+  try {
+    return (await api.post(`/api/erp/jobs/${jobId}/teach`)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to keep this report as a sample");
   }
 };
 
@@ -313,12 +509,16 @@ export const getErpSchema = async () => {
  * browser downloads it directly and the Content-Disposition filename (which
  * carries the Chinese name) survives.
  */
-export const erpExportUrl = (jobIds, fmt = "xlsx") => {
+export const erpExportUrl = (jobIds, fmt = "xlsx", { onlyReviewed = true } = {}) => {
   const ids = Array.isArray(jobIds) ? jobIds : [jobIds];
-  if (ids.length === 1 && fmt === "xlsx") {
-    return `${API_BASE_URL}/api/erp/jobs/${ids[0]}/export.xlsx`;
-  }
-  return `${API_BASE_URL}/api/erp/export.${fmt}?job_ids=${ids.join(",")}`;
+  // The batch endpoint holds back anything nobody has signed off on; the
+  // single-file one never did, because 知識通 hands that link out as a preview
+  // of what it read. Always go through the batch endpoint here so one report
+  // and five behave the same way in the UI.
+  return (
+    `${API_BASE_URL}/api/erp/export.${fmt}` +
+    `?job_ids=${ids.join(",")}&only_reviewed=${onlyReviewed}`
+  );
 };
 
 export default api;

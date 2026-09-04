@@ -12,8 +12,12 @@ RUN npm ci --frozen-lockfile
 COPY frontend/ ./
 
 # In production Docker, the nginx reverse proxy routes /api/* to the backend,
-# so we set baseURL to "/" (relative to origin) instead of a hardcoded host.
-ARG VITE_API_BASE_URL=/
+# so the baseURL is same-origin instead of a hardcoded host.
+# Do NOT write `/` here: Git Bash/MSYS rewrites a lone `/` build-arg to
+# `C:/Program Files/Git/`, which axios bakes in as baseURL and the browser then
+# reports "Unsupported protocol C:". `same-origin` is stripped to "" in
+# frontend/src/services/api.js.
+ARG VITE_API_BASE_URL=same-origin
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 
 RUN npm run build

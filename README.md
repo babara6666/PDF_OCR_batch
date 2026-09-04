@@ -91,14 +91,24 @@ docker build -f Dockerfile.allinone --build-arg TORCH_INDEX_URL=https://download
 ### 啟動
 
 ```bash
-# GPU 版，對外 port 9000
-docker run -d -p 9000:80 -v model_cache:/models --gpus all --name printlens printlens:gpu
+# GPU 版，對外 port 9000。不要把 named volume 掛在 /models 上：
+# 單一 image 的權重已經烤在 /models 裡，掛上去會把它們蓋掉。
+docker run -d -p 9000:80 --gpus all --name printlens printlens:gpu
 
 # CPU 版
-docker run -d -p 9000:80 -v model_cache:/models --name printlens printlens:latest
+docker run -d -p 9000:80 --name printlens printlens:latest
 ```
 
 開啟瀏覽器訪問 **http://localhost:9000**（或指定的 port）
+
+### 離線交付測試注意事項（PrintLens_20260904）
+
+測試人員測的是資料夾 `PrintLens_20260904/`（`docker load` 現成 image），不是 git clone、也不用 `--build`。
+
+- 整包拷貝，不要只傳 `.tar`。Windows 用 `.\load.cmd`；若擋「未經數位簽署」，不要改 ExecutionPolicy，改跑 `powershell -NoProfile -ExecutionPolicy Bypass -File .\load.ps1`。
+- 先 `docker rm -f printlens`。啟動後等 1–3 分鐘，`/api/health` 要 `"model_loaded":true` 再上傳。
+- 第一次用無痕視窗開 http://127.0.0.1:8080。開過舊版的瀏覽器會把舊 JS 快取一年，畫面會繼續噴 `Unsupported protocol C:`。
+- 確認頁面是 `index-CoXUUwBL.20260904.js`。品質檢查出現 `poor sharpness (score=…, threshold=2.0)` 是門檻警告，勾選後仍可開始 OCR；那不是部署失敗。
 
 ### 常用指令
 
@@ -186,9 +196,14 @@ PDF_OCR_FS/
 │   ├── quality_checker.py    # OCR 前品質檢查
 │   ├── notes_extractor.py    # 工程圖 Notes 區段提取
 │   ├── erp/                  # ERP 匯入模式（OCR → 知識通 → 匯入檔）
-│   │   ├── schema.yaml       #   7 個 ERP 欄位 + 供應商欄名別名（唯一事實來源）
-│   │   ├── schema.py         #   讀 schema、正規化知識通回填的列
-│   │   ├── store.py          #   檔案式 job 儲存（雙軌兩份 MD 都留，等知識通來拿）
+│   │   ├── schema.yaml       #   內建 default 設定檔（四維的 7 欄 + 別名）
+│   │   ├── profiles/         #   其他客戶的設定檔，執行時建立（不進 git）
+│   │   ├── learn.py          #   從 key.xlsx／已做過的報告學出一份設定檔
+│   │   ├── schema.py         #   讀設定檔、正規化回填的列、驗證新設定檔
+│   │   ├── store.py          #   檔案式 job 儲存（雙軌兩份 MD、原始 PDF、覆核狀態）
+│   │   ├── pages.py          #   把原始 PDF 算成頁面圖，給覆核畫面並排對照
+│   │   ├── llm.py            #   連不到知識通時，改叫本機 Ollama／公司 gateway
+│   │   ├── reference/        #   版型陷阱清單（llm.py 與 MCP resource 共用）
 │   │   ├── export.py         #   產出 xlsx / csv 匯入檔
 │   │   └── routes.py         #   /api/erp/*
 │   ├── bench_fastdoc.py      # 快速路徑 vs Marker 的量測工具
@@ -222,9 +237,9 @@ PDF_OCR_FS/
 由知識通讀懂內容、對應成 ERP 欄位後回填。
 
 ```
-上傳 PDF ─► OCR ─► 暫存為 job ─┐
-                                │  MCP（知識通主動來拿）
-   ERP 匯入檔 ◄── 人工覆核 ◄─────┘
+上傳 PDF ─► OCR ─► 暫存為 job（PDF 也一起留著）─┐
+                                                 │  MCP（知識通主動來拿）
+   ERP 匯入檔 ◄── 確認無誤 ◄── 對照原始 PDF 覆核 ◄┘
 ```
 
 **為什麼要 LLM 而不是繼續寫規則**：每家供應商叫法都不同——
@@ -267,10 +282,93 @@ PDF_OCR_FS/
 
 預設是關的：沒有接上知識通的話，每份報告都會卡在「等待中」沒有辦法往下走。
 
+### 連不到知識通時：讓後端自己叫模型
+
+知識通是 MCP **host**——它是被人叫來拿工作的，後端推不動它。工廠端連不到知識通
+時，整批報告就會卡在「等待中」。所以後端也可以自己叫一個模型做同一件事：
+
+```bash
+ERP_LLM_PROVIDERS=ollama,gateway     # 依序嘗試，本機優先
+OLLAMA_BASE_URL=http://localhost:11434
+GATEWAY_BASE_URL=http://llmgateway.fst:4000/v1
+GATEWAY_API_KEY=...                  # gateway 才需要
+```
+
+設了以後覆核頁上方會多一個「對應引擎」選單（本機模型／公司 gateway／知識通），
+選好按「開始對應」就直接跑，不必到知識通貼指令。模型清單是跟伺服器要的
+（Ollama 問 `/api/tags`、gateway 問 `/v1/models`），`ollama pull` 完就會出現；
+伺服器連不到時退回內建清單，**下拉選單不會變空**。
+
+留空（預設）＝完全維持原本行為，選單不會出現。
+
+前面的 provider 失敗就換下一個；全部失敗時 job **留在「等待中」**而不是「失敗」——
+文件本身沒問題，只是這一次沒跑成，知識通仍然可以接手，清單上也會顯示原因與「重試」。
+
+**要有心理準備**：遇到沒看過的供應商欄名時，本機 8B–35B 模型判斷得比知識通差，
+而那正是當初從 regex 改用 LLM 的唯一理由。擋在前面的是上面那道人工確認閘門，
+不是樂觀。上線前建議拿 `測試紀錄251117.xlsx` 的三輪覆核紀錄當答案，實測正確率。
+
+### 覆核：並排原文，確認過才匯得出去
+
+對應完的報告會停在覆核畫面，**左邊是原始 PDF 的頁面、右邊是可以直接改的表格**。
+逐格對照、缺的列補上、多出來的掃描雜訊刪掉，確定沒問題再按「確認無誤」。
+
+匯出**預設只收已確認的報告**，沒確認的會列在活頁簿的「未匯入」分頁（原因寫
+「尚未確認」），不會被無聲丟掉。真的趕時間可以勾「連未確認的一起匯出」。
+存過修改之後確認狀態會自動取消——按確認的人必須看過的是實際存下來的那一版。
+
+左邊顯示的是**後端算出來的頁面圖**，不是內嵌的 PDF 閱讀器：本專案的 CSP 設了
+`object-src 'none'` 與 `frame-ancestors 'none'`，同源也擋內嵌 PDF。改用圖片不必
+動那兩個標頭；而且這些報告多半本來就是掃描件，沒有文字層可以選取。要看純文字
+時按「原始 Markdown」。
+
+原始 PDF 由前端在辨識完之後才補傳（`POST /api/erp/jobs/{id}/source`），不擋表格
+出現。批次匯入或補傳失敗的報告沒有頁面圖，畫面會說明並要你改用 Markdown 對照。
+
+### 客戶設定檔：換一個客戶不用改程式
+
+一個設定檔＝一個客戶的答案：他們的 ERP 匯入範本要哪些欄位，以及他們的供應商
+怎麼稱呼那些東西。**兩者都會不一樣**——`schema.yaml` 那 7 欄是四維的範本，
+不是業界標準——所以設定檔擁有欄位定義本身，不只是別名。
+
+```
+backend/erp/schema.yaml        內建的 default 設定檔（四維）
+<ERP_PROFILES_DIR>/<id>.yaml   一個客戶一個檔，格式相同（執行時建立）
+```
+
+上傳畫面選設定檔，這批報告就用它的欄位與別名讀；job 會記住自己是哪一個設定檔，
+所以之後換客戶也不影響上週的匯出。一個活頁簿只有一種表頭，所以跨設定檔的批次
+不會硬湊在一起——設定檔不同的那幾份會列在「未匯入」。
+
+#### 怎麼生出一份新設定檔
+
+不必手寫。客戶手上已經有的兩種檔案就帶著答案：
+
+1. **他們的別名對照表（`key.xlsx`）** — 欄＝ERP 欄位、格子＝各家供應商寫法。
+   「管理設定檔 → 匯入別名對照表」直接讀進來，**完全不經過模型**：那張表本身
+   就是對應關係，讓模型改寫只會變差。四維的真實 `key.xlsx` 匯入後是 7 欄 154
+   種寫法，其中 152 種與手工維護了幾個月的 `schema.yaml` 相同。
+
+2. **他們已經做過的報告** — 幾份 COA，外加當初為每一份填好的匯入 xlsx。
+   只有 PDF 是不夠的：PDF 說得出供應商怎麼寫，說不出「你們判斷那是哪一欄」，
+   而那個判斷正是 `key.xlsx` 當年被人做出來的東西。附上答案才補得回來。
+   加了樣本與答案之後按「產生設定檔草稿」，由已設定的 LLM 歸納。
+
+兩條路都**只產生草稿，不會直接生效**。草稿落在下面的欄位編輯器裡，人看過、
+勾好必填、按儲存才寫成 yaml。沒有勾任何必填欄位會被擋下來——沒有必填欄位的話，
+模型吐出來的空白列會被照單全收。
+
+覆核完的報告上還有一顆「留作學習樣本」：把這份報告與你定案的列存成該設定檔的
+新樣本，人工修正因此會回流，而不是在 job 被清掉時一起蒸發。
+
+設定檔存在 `backend/erp/profiles/`，是客戶資料也是部署狀態，已經加進 `.gitignore`
+與 `.dockerignore`，用 Docker 時請跟 `erp_jobs` 一樣掛成 volume。
+
 ### 新增供應商欄名
 
-改 `backend/erp/schema.yaml` 對應欄位的 `aliases` 就好，存檔即生效
-（後端偵測 mtime 重讀，MCP server 也是即時取用），不需要重啟或重新部署。
+改對應設定檔的 `aliases` 就好（預設客戶是 `backend/erp/schema.yaml`，其餘在
+`backend/erp/profiles/<id>.yaml`），存檔即生效——後端偵測 mtime 重讀，MCP server
+也是即時取用，不需要重啟或重新部署。前端的設定檔編輯器做的也是同一件事。
 
 ### 相關環境變數
 
@@ -279,6 +377,8 @@ PDF_OCR_FS/
 | `ERP_JOBS_DIR` | `backend/erp_jobs` | 暫存 job 的位置 |
 | `ERP_JOBS_RETENTION_DAYS` | `14` | 超過就自動清掉（內含客戶檢驗資料） |
 | `ERP_JOBS_MAX` | `2000` | job 數量上限，超過從最舊的刪 |
+| `ERP_JOBS_MAX_MB` | `4096` | 暫存區容量上限，超過從最舊的刪 |
+| `ERP_SOURCE_MAX_MB` | `20` | 單份原始 PDF 的大小上限 |
 
 ---
 

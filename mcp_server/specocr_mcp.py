@@ -142,6 +142,10 @@ def _job_line(j: dict) -> str:
     bits = [f"- `{j['job_id']}`  {j.get('filename', '?')}", f"[{j.get('status')}]"]
     if j.get("row_count"):
         bits.append(f"{j['row_count']} 列")
+    # Only worth saying when it is not the built-in one: a non-default profile
+    # means a different column set, not just different aliases.
+    if (j.get("profile_id") or "default") != "default":
+        bits.append(f"設定檔={j['profile_id']}")
     if j.get("batch_id"):
         bits.append(f"batch={j['batch_id']}")
     if j.get("error"):
@@ -283,6 +287,30 @@ async def erp_get_markdown(
             "請告訴使用者這個檔案需要重新掃描，不要自行編造欄位。"
         )
 
+    # A job staged under a customer profile has its own column set, not just
+    # extra aliases, so the `specocr://reference/erp-schema` resource — which
+    # serves the built-in one — would be the wrong target to map onto. Carry
+    # the right definition with the document rather than hoping it is asked for.
+    profile = d.get("profile_id") or "default"
+    profile_schema = ""
+    if profile != "default":
+        try:
+            pr = await _request(
+                "GET", "/api/erp/schema.md", params={"profile": profile},
+                headers=_headers(),
+            )
+            profile_schema = (
+                f"\n\n---\n\n# ⚠ 這份報告用的是「{profile}」設定檔\n\n"
+                "**以下面這份欄位定義為準**，不要用 `specocr://reference/erp-schema` "
+                "那份（那是預設客戶的，欄位可能完全不同）。\n\n"
+                + pr.text
+            )
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            profile_schema = (
+                f"\n\n⚠ 這份報告用的是「{profile}」設定檔，但取不到它的欄位定義。"
+                "請先告訴使用者，不要照預設欄位硬填。"
+            )
+
     engine = d.get("engine") or "?"
     alt_engine = d.get("alt_engine") or "fastdoc"
     # `engine` reads "dual" when both ran — that is the name of the mode, not
@@ -296,16 +324,17 @@ async def erp_get_markdown(
     if variant == "alt":
         if not alt.strip():
             return head + "\n這份報告沒有第二份文字層原文，請改用 variant=primary。"
-        return head + f"\n---\n\n{_clip(alt, MAX_MARKDOWN_CHARS)}"
+        return head + profile_schema + f"\n---\n\n{_clip(alt, MAX_MARKDOWN_CHARS)}"
 
     body = f"\n---\n\n{_clip(md, MAX_MARKDOWN_CHARS)}"
     if variant == "primary" or not alt.strip():
-        return head + body
+        return head + profile_schema + body
 
     # Both engines ran. Say plainly what the second copy is for, or a reader
     # meeting the same table twice will treat it as two separate reports.
     return (
         head
+        + profile_schema
         + "\n這份報告有兩種輸出，**是同一份文件、同樣的內容**，不是兩份報告：\n"
         + f"1. 版面還原版（{primary_engine}）— 表格結構比較準，**判斷哪一欄是什麼看這份**。\n"
         + f"2. 文字層原文（{alt_engine}）— 直接抄檔案內嵌的文字、沒有經過辨識，"
@@ -397,9 +426,11 @@ async def erp_submit_rows(
 @mcp.tool(
     name="erp_export_url",
     description=(
-        "取得 ERP 匯入檔的下載連結。給一個 job_id 就出單檔；"
+        "取得你整理結果的**預覽**下載連結。給一個 job_id 就出單檔；"
         "給多個（逗號分隔）就把整批合併成一個活頁簿（彙總表 + 每個檔一張分頁）。"
-        "只有已回填過列的 job 才有內容。"
+        "只有已回填過列的 job 才有內容。\n"
+        "注意：這是預覽，**不是最終匯入檔**。真正要進 ERP 的檔案由使用者在規格析"
+        "頁面上逐份對照原始 PDF 確認之後才下載得到——把連結給他的時候一併說明。"
     ),
 )
 async def erp_export_url(
@@ -417,12 +448,17 @@ async def erp_export_url(
     if not ids:
         return "Error: job_ids 是空的。"
     fmt = "csv" if fmt.lower() == "csv" else "xlsx"
+    tail = "\n（這是覆核前的預覽。最終匯入檔請到規格析頁面逐份確認後下載。）"
     if len(ids) == 1 and fmt == "xlsx":
-        return f"ERP 匯入檔：{PUBLIC_BASE_URL}/api/erp/jobs/{ids[0]}/export.xlsx"
+        return f"預覽：{PUBLIC_BASE_URL}/api/erp/jobs/{ids[0]}/export.xlsx" + tail
     joined = ",".join(ids)
+    # only_reviewed defaults to true on the batch export — nothing is signed
+    # off yet at this point in the flow, so a default link would download an
+    # empty workbook. This one is explicitly the pre-review preview.
     return (
-        f"ERP 匯入檔（{len(ids)} 份合併）："
-        f"{PUBLIC_BASE_URL}/api/erp/export.{fmt}?job_ids={joined}"
+        f"預覽（{len(ids)} 份合併）："
+        f"{PUBLIC_BASE_URL}/api/erp/export.{fmt}?job_ids={joined}&only_reviewed=false"
+        + tail
     )
 
 
@@ -473,6 +509,19 @@ def erp_schema_reference() -> str:
 def report_patterns_reference() -> str:
     """實際遇過的報告版型與踩過的坑：合併儲存格、多頁報告、掃描件雜訊、
     規格寫成區間 vs 拆成上下限、特殊版型怎麼處理。"""
+    # Served live from backend/erp/reference/, which is also what the backend's
+    # own local-LLM mapper reads — so the two readers cannot drift apart. Falls
+    # back to the bundled copy when the backend is down, same as the schema
+    # resource above.
+    try:
+        r = httpx.get(
+            f"{BASE_URL}/api/erp/patterns.md", headers=_headers(), timeout=HTTP_TIMEOUT
+        )
+        r.raise_for_status()
+        if r.text.strip():
+            return r.text
+    except Exception:
+        pass
     return _read_ref("report-patterns.md")
 
 

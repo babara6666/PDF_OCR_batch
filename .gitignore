@@ -209,6 +209,10 @@ backend/uploads/
 
 # Staged ERP jobs — customer inspection data, written at runtime.
 backend/erp_jobs/
+# Learned customer profiles — one file per customer, created at runtime.
+# Customer data, and the deployment's own state: keep it out of the image
+# and out of git. Mount it as a volume beside erp_jobs.
+backend/erp/profiles/
 
 # MCP server secrets (the .env.example is committed, the .env is not).
 mcp_server/.env
@@ -259,6 +263,15 @@ models/*.pt
 
 # Exported Docker images bundle (large — never commit)
 printlens-images.tar.gz
+printlens-*.tar
+printlens-*.zip
+printlens-buildctx-*.tar
+printlens-deploy.tar
+printlens-image-*/
+hotfix-cache/
+*.tar
+# Offline delivery folders / zips (docker save, multi-GB)
+PrintLens*
 # Staged deploy bundle with model weights (3.3GB — never commit)
 printlens-deploy/
 

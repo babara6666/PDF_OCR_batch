@@ -1497,4 +1497,10 @@ if __name__ == "__main__":
 
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8001"))
-    uvicorn.run("main:app", host=host, port=port, reload=True)
+    # Reload is a local-dev convenience. Docker sets ENVIRONMENT=production so
+    # the WatchFiles reloader never starts in the image: it doubles RSS (parent
+    # + child both import torch) and has been seen to treat a Windows `C:\...`
+    # path as a URL ("unsupported protocol C:") when the image is run on Linux.
+    env = os.getenv("ENVIRONMENT", "").lower()
+    reload = env not in {"production", "prod"}
+    uvicorn.run("main:app", host=host, port=port, reload=reload)

@@ -47,7 +47,7 @@ services:
       dockerfile: Dockerfile.frontend
       args:
         # "/" → axios uses relative URLs; nginx proxies /api/* to backend
-        VITE_API_BASE_URL: /
+        VITE_API_BASE_URL: same-origin
     image: printlens-frontend:latest
     container_name: printlens-frontend
     restart: unless-stopped
