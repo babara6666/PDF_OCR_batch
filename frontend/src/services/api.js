@@ -522,3 +522,68 @@ export const erpExportUrl = (jobIds, fmt = "xlsx", { onlyReviewed = true } = {})
 };
 
 export default api;
+
+// ─── Wire-bond diagram mode ──────────────────────────────────────────────────
+// Everything after OCR is proxied by the backend to 圖衍析 (LLMCAD3), so these
+// are same-origin calls like the rest; the proxy adds 圖衍析's own token.
+
+/** Is 圖衍析 configured and answering, and which LLM engines can it use. Never throws. */
+export const wbStatus = async () => {
+  try {
+    const response = await api.get("/api/wirebond/status", { timeout: 20_000 });
+    return response.data;
+  } catch {
+    return { enabled: false, reachable: false, providers: {} };
+  }
+};
+
+/**
+ * Read the OCR'd documents into a netlist with an LLM.
+ * @param {{provider: string, model: string, documents: Array<{filename: string, markdown: string}>,
+ *          product_code?: string, customer?: string, package_code?: string, extra_texts?: string[]}} body
+ * @param {string} apiKey - browser-held key for cloud engines; empty for Ollama
+ */
+export const wbUnderstand = async (body, apiKey = "") => {
+  try {
+    const response = await api.post("/api/wirebond/understand", body, {
+      ...JSON_HEADERS,
+      headers: { ...JSON_HEADERS.headers, ...(apiKey ? { "X-Provider-Api-Key": apiKey } : {}) },
+      timeout: 900_000,
+    });
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Netlist could not be read");
+  }
+};
+
+/** Rank the history (POD/SBT records) against this netlist. */
+export const wbSearch = async (netlist, { topK = 5, includeSynthetic = true } = {}) => {
+  try {
+    const response = await api.post(
+      "/api/wirebond/search",
+      { netlist, top_k: topK, include_synthetic: includeSynthetic },
+      { ...JSON_HEADERS, timeout: 120_000 },
+    );
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "History search failed");
+  }
+};
+
+/** Draw the bonding diagram; the reference record's drawing style is inherited. */
+export const wbDraw = async (netlist, { referenceId = null, docNo = "" } = {}) => {
+  try {
+    const response = await api.post(
+      "/api/wirebond/draw",
+      { netlist, reference_id: referenceId, doc_no: docNo },
+      { ...JSON_HEADERS, timeout: 300_000 },
+    );
+    return response.data;
+  } catch (error) {
+    throw erpError(error, "Drawing failed");
+  }
+};
+
+/** URL of one artifact of a drawing job (pdf | dxf | dwg | png | png2 | png3). */
+export const wbFileUrl = (jobId, kind) =>
+  `${API_BASE_URL}/api/wirebond/${encodeURIComponent(jobId)}/files/${kind}`;

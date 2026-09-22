@@ -36,6 +36,7 @@ from yolo_detector import YOLONotesDetector  # noqa: E402
 
 import fastdoc  # noqa: E402
 import erp  # noqa: E402
+import wirebond  # noqa: E402
 from fastdoc.detect import detect_bytes  # noqa: E402
 from fastdoc.router import SUPPORTED as FASTDOC_FORMATS  # noqa: E402
 
@@ -563,6 +564,11 @@ app.add_middleware(ApiKeyMiddleware)
 # Sits behind the same API-key/rate-limit middleware as every other /api route.
 app.include_router(erp.router)
 
+# 打線圖 mode. The OCR front half is the ordinary batch upload; these routes
+# proxy the LLM reading, history search and drawing to 圖衍析 (LLMCAD3) so its
+# token stays server-side. Off (503) until LLMCAD_BASE_URL is set.
+app.include_router(wirebond.router)
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -595,6 +601,7 @@ async def root():
             "erp_jobs": "/api/erp/jobs",
             "erp_schema": "/api/erp/schema",
             "erp_export": "/api/erp/export.xlsx",
+            "wirebond_status": "/api/wirebond/status",
             "health": "/api/health",
         },
     }
@@ -610,6 +617,7 @@ async def health_check():
         "yolo_notes_detector": bool(detector and detector.is_loaded),
         "fastdoc_routing": FASTDOC_ROUTING,
         "fastdoc_dual": FASTDOC_DUAL,
+        "wirebond": wirebond.enabled(),
         "supported_formats": list(ALLOWED_EXTENSIONS),
     }
 

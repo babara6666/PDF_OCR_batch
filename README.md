@@ -12,6 +12,7 @@
 - ⚡ **GPU 加速**: 支援 CUDA GPU 加速處理
 - 📦 **打包下載**: 批次轉換完成後自動整理與下載結果
 - 🏭 **ERP 匯入模式**: 供應商進料檢驗報告（COA）交給知識通做欄位對應，覆核後匯出 ERP 匯入檔（見下方「ERP 匯入模式」）
+- 🔌 **打線圖模式**: 客戶的 Wafer Information 與 Netlist 掃描件在這裡 OCR，交給圖衍析讀成 netlist、找相似的歷史 POD/SBT、依規則畫出打線圖（見下方「打線圖模式」）
 
 ---
 
@@ -379,6 +380,46 @@ backend/erp/schema.yaml        內建的 default 設定檔（四維）
 | `ERP_JOBS_MAX` | `2000` | job 數量上限，超過從最舊的刪 |
 | `ERP_JOBS_MAX_MB` | `4096` | 暫存區容量上限，超過從最舊的刪 |
 | `ERP_SOURCE_MAX_MB` | `20` | 單份原始 PDF 的大小上限 |
+
+---
+
+## 打線圖模式（Wafer Information + Netlist → 圖衍析 → 打線圖）
+
+客戶提供新的 wafer information 與 netlist（pad list），要從歷史 POD/SBT 中找可 reuse 的設計，
+再依 netlist 接線規則畫出 Die / Pad / Wire 打線圖。整條流程的後半段（LLM 讀 netlist、
+歷史檢索、依規則出圖）住在圖衍析（LLMCAD3）的 `/api/wirebond/*`；這個分頁是從規格析
+這一側進來的入口：
+
+```
+前端  上傳掃描件 / PDF / 試算表 ──► 既有的品質檢查 + OCR（Marker / fastdoc）
+      GET  /api/wirebond/status        圖衍析連得到嗎、有哪些 LLM 引擎
+      POST /api/wirebond/understand    OCR 文字 → LLM 讀成 netlist（pydantic 驗證，可重讀）
+      POST /api/wirebond/search        在歷史 POD/SBT 中找相似（分數 + 原因，選一份當樣式參考）
+      POST /api/wirebond/draw          依既定規則出圖：DXF / DWG / PDF 三張 A4 圖頁
+      GET  /api/wirebond/{job}/files/… 下載
+```
+
+後端只是代理（`backend/wirebond.py`）：圖衍析的 `X-App-Token` 留在伺服器端，瀏覽器不用面對
+第二個 origin。沒設 `LLMCAD_BASE_URL` 時分頁會說明未啟用，OCR 結果照常可用。
+
+### 啟用
+
+```bash
+# .env
+LLMCAD_BASE_URL=http://localhost:8000            # Docker 內連宿主機：http://host.docker.internal:8000
+LLMCAD_APP_TOKEN=                                # 圖衍析那邊有設 APP_API_TOKEN 才填
+LLMCAD_TIMEOUT_SECONDS=900                       # LLM 讀 netlist 在共用 GPU 上以分鐘計
+```
+
+圖衍析那一側則要能連回這裡的 OCR（它的 `OCR_BASE_URL`），兩邊互相指向即可。
+前端旗標在 `frontend/src/config.js` 的 `WIREBOND_ENABLED`。
+
+### 測試
+
+```bash
+python -m pytest backend/tests/test_wirebond.py -q                      # 離線：代理的邊界行為
+WIREBOND_LIVE=1 LLMCAD_BASE_URL=http://127.0.0.1:8000   WIREBOND_OCR_DIR=<含 ocr_*.md 的資料夾>   python -m pytest backend/tests/test_wirebond.py -q -k live            # 真的跑 LLM → 檢索 → 出圖
+```
 
 ---
 

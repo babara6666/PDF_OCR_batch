@@ -12,3 +12,10 @@ export const NOTES_ENABLED = false;
 // the deployment ever loses its registered MCP URL.
 // See mcp_server/README.md for the setup.
 export const ERP_ENABLED = true;
+
+// WIREBOND_ENABLED: the 打線圖 mode (Wafer Information + Netlist → OCR here →
+// 圖衍析 reads the netlist, finds similar POD/SBT history, draws the bonding
+// diagram). The tab also needs the backend's LLMCAD_BASE_URL; with it unset
+// /api/wirebond/status says `enabled: false` and the UI explains instead of
+// failing on the first click.
+export const WIREBOND_ENABLED = true;

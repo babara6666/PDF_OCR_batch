@@ -1,5 +1,5 @@
 import { useT } from "../i18n/index.jsx";
-import { NOTES_ENABLED, ERP_ENABLED } from "../config";
+import { NOTES_ENABLED, ERP_ENABLED, WIREBOND_ENABLED } from "../config";
 
 // Sliding switch across however many modes are enabled. Both extra modes sit
 // behind flags, so this renders 1, 2, or 3 positions depending on config —
@@ -8,6 +8,7 @@ const ALL_MODES = [
   { id: "ocr", icon: "description", enabled: true },
   { id: "notes", icon: "sticky_note_2", enabled: NOTES_ENABLED },
   { id: "erp", icon: "table_view", enabled: ERP_ENABLED },
+  { id: "wirebond", icon: "cable", enabled: WIREBOND_ENABLED },
 ];
 
 const ModeToggle = ({ mode, onChange, className = "" }) => {
@@ -21,7 +22,7 @@ const ModeToggle = ({ mode, onChange, className = "" }) => {
     0,
     modes.findIndex((m) => m.id === mode),
   );
-  const label = { ocr: t.modeOcr, notes: t.modeNotes, erp: t.modeErp };
+  const label = { ocr: t.modeOcr, notes: t.modeNotes, erp: t.modeErp, wirebond: t.modeWirebond };
 
   return (
     <div className={className}>
@@ -46,7 +47,11 @@ const ModeToggle = ({ mode, onChange, className = "" }) => {
                   : "text-on-surface-variant dark:text-[#cfc5b7]"
               }`}
             >
-              <span className="material-symbols-outlined text-[16px]">{m.icon}</span>
+              {/* Three positions in the 256px sidebar leave no room for icons
+                  next to the labels; the label is the part that has to survive. */}
+              {modes.length < 3 && (
+                <span className="material-symbols-outlined text-[16px]">{m.icon}</span>
+              )}
               <span className="truncate">{label[m.id]}</span>
             </button>
           );

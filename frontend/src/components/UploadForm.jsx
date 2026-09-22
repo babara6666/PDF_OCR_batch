@@ -82,7 +82,9 @@ const UploadForm = ({
             ? t.uploadDescNotes
             : mode === "erp"
               ? t.erpUploadDesc
-              : t.uploadDescOcr}
+              : mode === "wirebond"
+                ? t.wbUploadDesc
+                : t.uploadDescOcr}
         </p>
       </div>
 

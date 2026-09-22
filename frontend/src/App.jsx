@@ -5,6 +5,7 @@ import BatchResults from "./components/BatchResults";
 import NotesResults from "./components/NotesResults";
 import ErpResults from "./components/ErpResults";
 import ErpProfiles from "./components/ErpProfiles";
+import WireBondResults from "./components/WireBondResults";
 import QualityReview from "./components/QualityReview";
 import ModeToggle from "./components/ModeToggle";
 import LicensePage from "./components/LicensePage";
@@ -18,7 +19,7 @@ import {
   listErpProfiles,
 } from "./services/api";
 import { useT } from "./i18n/index.jsx";
-import { NOTES_ENABLED, ERP_ENABLED } from "./config";
+import { NOTES_ENABLED, ERP_ENABLED, WIREBOND_ENABLED } from "./config";
 
 // Groups the files of one upload so the ERP view can ask the backend for
 // "this batch" instead of tracking ids by hand.
@@ -224,8 +225,8 @@ function App() {
       if (mode === "notes") {
         response = await extractNotesBatch(filesToProcess, true, onUpload);
       } else {
-        // ocr and erp run the identical front half — same engines, same
-        // quality gate. Only what happens to the markdown afterwards differs.
+        // ocr, erp and wirebond run the identical front half — same engines,
+        // same quality gate. Only what happens to the markdown afterwards differs.
         response = await uploadBatch(filesToProcess, onUpload, force, dualMode);
       }
 
@@ -376,7 +377,7 @@ function App() {
             {/* Desktop breadcrumb */}
             <nav className="hidden md:flex items-center gap-8 font-label text-sm uppercase tracking-widest">
               <span className="text-primary dark:text-[#dcc497] font-bold border-b-2 border-tertiary dark:border-[#dcc497] pb-0.5">
-                {mode === "notes" ? t.modeNotes : mode === "erp" ? t.modeErp : t.modeOcr}
+                {mode === "notes" ? t.modeNotes : mode === "erp" ? t.modeErp : mode === "wirebond" ? t.modeWirebond : t.modeOcr}
               </span>
             </nav>
           </div>
@@ -541,13 +542,17 @@ function App() {
           {!isProcessing && erpBatchId && mode === "erp" && (
             <ErpResults batchId={erpBatchId} onNewUpload={handleNewUpload} />
           )}
+
+          {!isProcessing && results && mode === "wirebond" && (
+            <WireBondResults results={results} onNewUpload={handleNewUpload} />
+          )}
           </>
           )}
         </main>
       </div>
 
       {/* ── Mobile bottom nav (hidden when it would be empty) ──────────────────── */}
-      {(NOTES_ENABLED || ERP_ENABLED || results) && (
+      {(NOTES_ENABLED || ERP_ENABLED || WIREBOND_ENABLED || results) && (
         <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-surface-container-low dark:bg-[#1c1b1b] py-3 px-6 flex items-center gap-3 z-50 rounded-t-3xl border-t border-outline-variant dark:border-[#4c463c] shadow-2xl">
           <ModeToggle mode={mode} onChange={handleModeChange} className="flex-1" />
           {results && (
