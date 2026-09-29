@@ -220,6 +220,8 @@ def save_source(job_id: str, data: bytes, page_count: int) -> dict:
         raise JobNotFound(job_id)
 
     (d / "source.pdf").write_bytes(data)
+    # Rendered pages and the text index describe the previous PDF, if any.
+    shutil.rmtree(d / "pages", ignore_errors=True)
     meta.update(has_source=True, page_count=page_count)
     _write_json(d / "meta.json", meta)
     return meta

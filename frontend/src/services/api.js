@@ -329,6 +329,36 @@ export const uploadErpSource = async (jobId, file) => {
 export const erpPageUrl = (jobId, pageNo, width = 1400) =>
   `${API_BASE_URL}/api/erp/jobs/${jobId}/page/${pageNo}.png?w=${width}`;
 
+/**
+ * Build the searchable text of a job's pages ahead of the first click. A
+ * scanned report is OCR'd here, which takes seconds, so the review pane calls
+ * this as soon as a report is opened.
+ * @returns {Promise<{pages: Array<{page: number, source: "text"|"ocr"|"none"}>}>}
+ */
+export const getErpTextIndex = async (jobId) => {
+  try {
+    return (await api.get(`/api/erp/jobs/${jobId}/text-index`)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to index the source PDF");
+  }
+};
+
+/**
+ * Where a value from the review table is printed on the source pages.
+ * @param {string[]} context - the row's other cells, used to rank the hits
+ * @returns {Promise<{hits: Array<{page: number, box: number[], text: string}>, searchable: boolean}>}
+ *   boxes are page fractions, top-left origin
+ */
+export const locateErpValue = async (jobId, query, context = []) => {
+  try {
+    const params = new URLSearchParams({ q: query });
+    context.forEach((c) => params.append("ctx", c));
+    return (await api.get(`/api/erp/jobs/${jobId}/locate?${params}`)).data;
+  } catch (error) {
+    throw erpError(error, "Failed to locate the value");
+  }
+};
+
 /** Record (or take back) a human's sign-off on a job's rows. */
 export const setErpReviewed = async (jobId, reviewed) => {
   try {

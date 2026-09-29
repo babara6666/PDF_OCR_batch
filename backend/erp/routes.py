@@ -16,6 +16,7 @@ The flow this serves:
           POST /api/erp/jobs/{id}/source          補上原始 PDF，供覆核時對照
           GET  /api/erp/jobs/{id}    輪詢、顯示、讓人覆核（可再 PUT 修正）
           GET  /api/erp/jobs/{id}/page/{n}.png    覆核畫面左邊的頁面影像
+          GET  /api/erp/jobs/{id}/locate?q=15     點表格數值 → 在頁面上框出來
           POST /api/erp/jobs/{id}/review          人工確認過了
           GET  /api/erp/export.xlsx  匯出給 ERP（預設只收已確認的）
 """
@@ -24,10 +25,11 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
-from . import export, learn, llm, pages, schema, store
+from . import export, learn, llm, locate, pages, schema, store
 
 logger = logging.getLogger("printlens.erp")
 
@@ -534,6 +536,64 @@ async def get_page(
         media_type="image/png",
         headers={"Cache-Control": "private, max-age=3600"},
     )
+
+
+# ── Locating a value on the page ─────────────────────────────────────────────
+def _job_with_source_or_404(job_id: str) -> dict:
+    try:
+        meta = store.get_meta(job_id)
+    except store.JobNotFound:
+        raise HTTPException(status_code=404, detail="Job not found") from None
+    if not meta.get("has_source"):
+        raise HTTPException(status_code=404, detail="這份沒有留下原始 PDF")
+    return meta
+
+
+@router.get("/jobs/{job_id}/text-index")
+async def get_text_index(job_id: str):
+    """Build (or read back) the searchable text of every page.
+
+    The review pane calls this when a report is opened, so the first click on
+    a scanned report does not wait on OCR. Returns how each page was indexed,
+    which is also what tells the UI a scan could not be searched.
+    """
+    _job_with_source_or_404(job_id)
+    try:
+        idx = await run_in_threadpool(locate.job_index, job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"無法建立定位索引（{e}）") from None
+    return {
+        "pages": [
+            {"page": p.page, "source": p.source, "segments": len(p.segments), "note": p.note}
+            for p in idx
+        ]
+    }
+
+
+@router.get("/jobs/{job_id}/locate")
+async def locate_value(
+    job_id: str,
+    q: str = Query(..., min_length=1, max_length=200),
+    ctx: list[str] = Query(default=[], max_length=8),
+):
+    """Where a value from the review table is printed on the source pages.
+
+    `ctx` is the rest of the row — the test item, the spec — used only to
+    rank: a "15" printed on the same line as its test item beats a "15" in
+    the date. Boxes are page fractions (0–1, top-left origin).
+    """
+    _job_with_source_or_404(job_id)
+    ctx = [c[:200] for c in ctx]
+    try:
+        idx = await run_in_threadpool(locate.job_index, job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"無法建立定位索引（{e}）") from None
+    hits = locate.find(idx, q, ctx)
+    return {
+        "query": q,
+        "hits": [h.as_dict() for h in hits],
+        "searchable": any(p.source != "none" for p in idx),
+    }
 
 
 # ── Review sign-off ──────────────────────────────────────────────────────────

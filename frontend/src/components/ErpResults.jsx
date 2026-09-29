@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "../i18n/index.jsx";
 import {
   deleteErpJob,
@@ -7,13 +7,16 @@ import {
   getErpJob,
   getErpLlm,
   getErpSchema,
+  getErpTextIndex,
   listErpJobs,
+  locateErpValue,
   mapErpBatch,
   mapErpJob,
   putErpRows,
   setErpReviewed,
   teachFromErpJob,
 } from "../services/api";
+import { checkRow } from "../utils/specCheck";
 
 // How often to re-check whether 知識通 has posted rows back. The work happens
 // in another system on a human's timescale, so this is a courtesy refresh, not
@@ -52,6 +55,14 @@ const PILL_FILLED =
   "px-4 py-1.5 rounded-full bg-primary dark:bg-[#dcc497] text-on-primary " +
   "dark:text-[#3d2e0e] text-xs font-label font-semibold hover:opacity-90 transition-all";
 
+// How long focus has to rest on a cell before it is looked up. Tabbing across
+// a row should light up where the tab stops, not every cell it passes.
+const LOCATE_DELAY_MS = 150;
+
+// Breathing room around a located box, in page fractions: a frame drawn tight
+// against the glyphs hides the very digits it points at.
+const BOX_PAD = 0.004;
+
 /**
  * The source document, one rendered page under another.
  *
@@ -59,27 +70,115 @@ const PILL_FILLED =
  * `object-src 'none'` and `frame-ancestors 'none'`, so an iframe or embed
  * holding a PDF is blocked even same-origin. Rendering server-side also suits
  * the material — most of these COAs are scans, so there was never a text layer
- * to select — and it gives page numbers to hang a future "jump to this row's
- * page" off.
+ * to select.
+ *
+ * `locate` is what the review table last asked to find. Its boxes are page
+ * fractions drawn over the page images, so they hold at any zoom, and the
+ * pane scrolls itself — not the window — so the table beside it stays put.
  */
-const PdfPane = ({ jobId, pageCount, t }) => {
+const PdfPane = ({ jobId, pageCount, locate, onStep, onClear, t }) => {
   const [zoom, setZoom] = useState(1);
   const [failed, setFailed] = useState({});
+  const [loaded, setLoaded] = useState({});
+  const scrollRef = useRef(null);
+  const activeRef = useRef(null);
 
   // Reset when the reviewer moves to another report, or a long scan leaves the
   // pane scrolled and magnified over the next one-page document.
   useEffect(() => {
     setZoom(1);
     setFailed({});
+    setLoaded({});
   }, [jobId]);
 
   const zoomIdx = ZOOM_STEPS.indexOf(zoom);
   const width = Math.round(BASE_PAGE_WIDTH * zoom);
   const pageNos = Array.from({ length: pageCount }, (_, i) => i + 1);
 
+  const hits = locate?.hits || [];
+  const active = hits[locate?.index ?? 0] || null;
+
+  // Bring the active box to the middle of the pane. Re-runs when a page
+  // finishes loading: until then the page has no height and the box no place.
+  useEffect(() => {
+    const box = activeRef.current;
+    const pane = scrollRef.current;
+    if (!box || !pane) return;
+    const b = box.getBoundingClientRect();
+    const p = pane.getBoundingClientRect();
+    pane.scrollBy({
+      top: b.top - p.top - p.height / 2 + b.height / 2,
+      left: b.left - p.left - p.width / 2 + b.width / 2,
+      behavior: "smooth",
+    });
+  }, [active, zoom, loaded]);
+
+  let status = null;
+  if (locate?.query) {
+    if (locate.loading) status = t.erpLocating(locate.query);
+    else if (locate.error) status = locate.error;
+    else if (!locate.searchable) status = t.erpLocateUnsearchable;
+    else if (!hits.length) status = t.erpLocateNone(locate.query);
+    else status = t.erpLocateFound(locate.query, (locate.index ?? 0) + 1, hits.length);
+  }
+
+  const iconBtn =
+    "w-6 h-6 shrink-0 rounded-full grid place-items-center hover:bg-surface-container-low dark:hover:bg-[#1c1b1b]";
+
   return (
     <div className="rounded-2xl border border-outline-variant dark:border-[#4c463c] overflow-hidden flex flex-col">
-      <div className="flex items-center justify-end gap-1 px-3 py-2 bg-surface-container-high dark:bg-[#2a2a2a]">
+      <div className="flex items-center gap-1 px-3 py-2 bg-surface-container-high dark:bg-[#2a2a2a]">
+        {/* What the table last asked for, and a way through several hits. */}
+        <div className="flex-1 min-w-0 flex items-center gap-1" aria-live="polite">
+          {status ? (
+            <>
+              <span
+                className={`material-symbols-outlined text-[16px] shrink-0 ${
+                  hits.length ? "text-error dark:text-[#ffb4ab]" : "opacity-50"
+                } ${locate.loading ? "animate-spin" : ""}`}
+              >
+                {locate.loading ? "sync" : "center_focus_strong"}
+              </span>
+              <span
+                className="text-[11px] font-label text-on-surface-variant dark:text-[#cfc5b7] truncate"
+                title={status}
+              >
+                {status}
+              </span>
+              {hits.length > 1 && (
+                <>
+                  <button
+                    onClick={() => onStep(-1)}
+                    aria-label={t.erpLocatePrev}
+                    className={iconBtn}
+                  >
+                    <span className="material-symbols-outlined text-[16px]">chevron_left</span>
+                  </button>
+                  <button
+                    onClick={() => onStep(1)}
+                    aria-label={t.erpLocateNext}
+                    className={iconBtn}
+                  >
+                    <span className="material-symbols-outlined text-[16px]">chevron_right</span>
+                  </button>
+                </>
+              )}
+              <button onClick={onClear} aria-label={t.erpLocateClear} className={iconBtn}>
+                <span className="material-symbols-outlined text-[16px]">close</span>
+              </button>
+            </>
+          ) : locate?.indexing ? (
+            <span className="flex items-center gap-1 text-[11px] font-label text-on-surface-variant dark:text-[#cfc5b7] opacity-70 truncate">
+              <span className="material-symbols-outlined text-[14px] animate-spin">sync</span>
+              {t.erpIndexing}
+            </span>
+          ) : (
+            <span className="text-[11px] font-label text-on-surface-variant dark:text-[#cfc5b7] opacity-60 truncate">
+              {t.erpLocateHint}
+            </span>
+          )}
+        </div>
+
         <button
           onClick={() => setZoom(ZOOM_STEPS[Math.max(0, zoomIdx - 1)])}
           disabled={zoomIdx <= 0}
@@ -102,7 +201,10 @@ const PdfPane = ({ jobId, pageCount, t }) => {
       </div>
 
       {/* Fixed height so the table beside it stays put while the page scrolls. */}
-      <div className="overflow-auto custom-scrollbar bg-surface-container-low dark:bg-[#1c1b1b] h-[70vh] p-3 space-y-4">
+      <div
+        ref={scrollRef}
+        className="overflow-auto custom-scrollbar bg-surface-container-low dark:bg-[#1c1b1b] h-[70vh] p-3 space-y-4"
+      >
         {pageNos.map((n) => (
           <figure key={n} className="space-y-1">
             <figcaption className="text-[10px] font-label uppercase tracking-widest text-on-surface-variant dark:text-[#cfc5b7] opacity-50">
@@ -111,19 +213,76 @@ const PdfPane = ({ jobId, pageCount, t }) => {
             {failed[n] ? (
               <p className="text-xs text-error dark:text-[#ffb4ab] py-4">{t.erpPageFailed}</p>
             ) : (
-              <img
-                src={erpPageUrl(jobId, n, width)}
-                alt={t.erpPageOf(n, pageCount)}
-                loading="lazy"
-                onError={() => setFailed((f) => ({ ...f, [n]: true }))}
-                style={{ width: `${zoom * 100}%`, maxWidth: "none" }}
-                className="rounded-lg shadow-sm bg-white"
-              />
+              <div className="relative" style={{ width: `${zoom * 100}%` }}>
+                <img
+                  src={erpPageUrl(jobId, n, width)}
+                  alt={t.erpPageOf(n, pageCount)}
+                  // The page holding the active hit loads now, whatever is on
+                  // screen: the pane cannot scroll to a page with no height.
+                  loading={active?.page === n ? "eager" : "lazy"}
+                  onLoad={() => setLoaded((l) => ({ ...l, [n]: true }))}
+                  onError={() => setFailed((f) => ({ ...f, [n]: true }))}
+                  className="block w-full rounded-lg shadow-sm bg-white"
+                />
+                {hits.map((h, i) =>
+                  h.page !== n ? null : (
+                    <div
+                      key={i}
+                      ref={h === active ? activeRef : undefined}
+                      aria-hidden="true"
+                      className={`absolute pointer-events-none rounded-sm ${
+                        h === active
+                          ? "border-2 border-error bg-error/15 ring-4 ring-error/20"
+                          : "border border-dashed border-error/60"
+                      }`}
+                      style={{
+                        left: `${(h.box[0] - BOX_PAD) * 100}%`,
+                        top: `${(h.box[1] - BOX_PAD) * 100}%`,
+                        width: `${(h.box[2] - h.box[0] + 2 * BOX_PAD) * 100}%`,
+                        height: `${(h.box[3] - h.box[1] + 2 * BOX_PAD) * 100}%`,
+                      }}
+                    />
+                  )
+                )}
+              </div>
             )}
           </figure>
         ))}
       </div>
     </div>
+  );
+};
+
+/** The in/out-of-spec badge beside a row's result. */
+const SpecBadge = ({ check, t }) => {
+  if (check.status === "none") {
+    return (
+      <span
+        className="text-xs text-on-surface-variant dark:text-[#cfc5b7] opacity-40 px-2 cursor-help"
+        title={t.erpSpecNone[check.reason] || ""}
+      >
+        —
+      </span>
+    );
+  }
+  const pass = check.status === "pass";
+  let label = t.erpSpecPass;
+  if (pass && check.reason === "text") label = t.erpSpecMatch;
+  if (!pass) label = check.side === "low" ? t.erpSpecLow : t.erpSpecHigh;
+  let icon = "check_circle";
+  if (!pass) icon = check.side === "low" ? "arrow_downward" : "arrow_upward";
+  return (
+    <span
+      title={check.label ? t.erpSpecRange(check.label) : undefined}
+      className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[11px] font-label font-bold whitespace-nowrap ${
+        pass
+          ? "bg-green-600/10 text-green-700 dark:bg-green-400/10 dark:text-green-400"
+          : "bg-error-container text-error dark:bg-[#93000a]/30 dark:text-[#ffb4ab]"
+      }`}
+    >
+      <span className="material-symbols-outlined text-[14px]">{icon}</span>
+      {label}
+    </span>
   );
 };
 
@@ -149,6 +308,12 @@ const ErpResults = ({ batchId, onNewUpload }) => {
   const [model, setModel] = useState("");
   const [mapping, setMapping] = useState(false);
   const [taught, setTaught] = useState(false);
+
+  // What the table last asked the PDF pane to find (see locateCell).
+  const [locate, setLocate] = useState(null);
+  const [indexing, setIndexing] = useState(false);
+  const locateSeq = useRef(0);
+  const locateTimer = useRef(null);
 
   // Keeps the poll from stomping on a half-typed correction.
   const editingRef = useRef(false);
@@ -232,6 +397,59 @@ const ErpResults = ({ batchId, onNewUpload }) => {
   const isReviewed = Boolean(selectedJob?.reviewed_at);
   const hasSource = Boolean(selectedJob?.has_source && selectedJob?.page_count > 0);
 
+  // Index the pages as soon as a report is opened: on a scan that means OCR,
+  // and the reviewer's first click should not be the thing that waits for it.
+  useEffect(() => {
+    setLocate(null);
+    locateSeq.current += 1;
+    if (!selectedId || !hasSource) return;
+    let cancelled = false;
+    setIndexing(true);
+    getErpTextIndex(selectedId)
+      .catch(() => {}) // the lookup itself reports what went wrong
+      .finally(() => !cancelled && setIndexing(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, hasSource]);
+
+  // Focusing a cell frames where its value is printed. Focus rather than a
+  // separate button, so tabbing along a row walks the page with it; the rest
+  // of the row goes along as context, which is what picks this row's "15" over
+  // the "15" in the date.
+  const locateCell = (row, key) => {
+    window.clearTimeout(locateTimer.current);
+    const query = String(row[key] ?? "").trim();
+    if (!hasSource || !query || !selectedId) return;
+    const jobId = selectedId;
+    const context = columns
+      .filter((c) => c.key !== key)
+      .map((c) => String(row[c.key] ?? "").trim())
+      .filter(Boolean);
+    locateTimer.current = setTimeout(async () => {
+      const seq = ++locateSeq.current;
+      setSplitView(true);
+      setLocate({ query, loading: true, hits: [], index: 0 });
+      try {
+        const res = await locateErpValue(jobId, query, context);
+        if (seq !== locateSeq.current) return; // a later cell has taken over
+        setLocate({ query, hits: res.hits, searchable: res.searchable, index: 0 });
+      } catch (e) {
+        if (seq === locateSeq.current) setLocate({ query, hits: [], error: e.message, index: 0 });
+      }
+    }, LOCATE_DELAY_MS);
+  };
+
+  const stepLocate = (d) =>
+    setLocate((l) =>
+      l?.hits?.length ? { ...l, index: (l.index + d + l.hits.length) % l.hits.length } : l
+    );
+
+  const clearLocate = () => {
+    locateSeq.current += 1;
+    setLocate(null);
+  };
+
   const instruction = useMemo(
     () => t.erpInstructionBody(pending.length || jobs.length),
     [t, pending.length, jobs.length]
@@ -281,6 +499,11 @@ const ErpResults = ({ batchId, onNewUpload }) => {
   };
 
   const rows = draftRows ?? detail?.rows ?? [];
+  // Recomputed on every render, so a corrected digit re-judges as it is typed.
+  // Only offered where the profile has a result column to judge.
+  const judging = columns.some((c) => c.key === "result");
+  const checks = judging ? rows.map(checkRow) : [];
+  const outOfSpec = checks.filter((c) => c.status === "fail").length;
   const blankRow = () => Object.fromEntries(columns.map((c) => [c.key, ""]));
   const mutateRows = (fn) => setDraftRows((cur) => fn(cur ?? detail?.rows ?? []));
 
@@ -369,15 +592,22 @@ const ErpResults = ({ batchId, onNewUpload }) => {
               <thead>
                 <tr className="bg-surface-container-high dark:bg-[#2a2a2a]">
                   {columns.map((c) => (
-                    <th
-                      key={c.key}
-                      className="text-left font-label text-xs font-bold px-3 py-2.5 whitespace-nowrap text-on-surface-variant dark:text-[#cfc5b7]"
-                    >
-                      {c.name}
-                      {c.required && (
-                        <span className="text-error dark:text-[#ffb4ab] ml-0.5">*</span>
+                    <Fragment key={c.key}>
+                      <th className="text-left font-label text-xs font-bold px-3 py-2.5 whitespace-nowrap text-on-surface-variant dark:text-[#cfc5b7]">
+                        {c.name}
+                        {c.required && (
+                          <span className="text-error dark:text-[#ffb4ab] ml-0.5">*</span>
+                        )}
+                      </th>
+                      {c.key === "result" && (
+                        <th
+                          title={t.erpSpecHint}
+                          className="text-left font-label text-xs font-bold px-3 py-2.5 whitespace-nowrap text-on-surface-variant dark:text-[#cfc5b7]"
+                        >
+                          {t.erpSpecCol}
+                        </th>
                       )}
-                    </th>
+                    </Fragment>
                   ))}
                   <th className="w-16" />
                 </tr>
@@ -386,18 +616,30 @@ const ErpResults = ({ batchId, onNewUpload }) => {
                 {rows.map((row, i) => (
                   <tr
                     key={i}
-                    className="border-t border-outline-variant dark:border-[#4c463c] group"
+                    className={`border-t border-outline-variant dark:border-[#4c463c] group ${
+                      checks[i]?.status === "fail"
+                        ? "bg-error-container/40 dark:bg-[#93000a]/10"
+                        : ""
+                    }`}
                   >
                     {columns.map((c) => (
-                      <td key={c.key} className="px-1.5 py-1">
-                        <input
-                          value={row[c.key] ?? ""}
-                          onChange={(e) => editCell(i, c.key, e.target.value)}
-                          className={`w-full bg-transparent px-2 py-1.5 rounded-lg text-on-background dark:text-[#e5e2e1] focus:bg-surface-container-high dark:focus:bg-[#2a2a2a] focus:outline-none focus:ring-1 focus:ring-primary dark:focus:ring-[#dcc497] ${
-                            COL_WIDTH[c.key] || "min-w-[7rem]"
-                          }`}
-                        />
-                      </td>
+                      <Fragment key={c.key}>
+                        <td className="px-1.5 py-1">
+                          <input
+                            value={row[c.key] ?? ""}
+                            onFocus={() => locateCell(row, c.key)}
+                            onChange={(e) => editCell(i, c.key, e.target.value)}
+                            className={`w-full bg-transparent px-2 py-1.5 rounded-lg text-on-background dark:text-[#e5e2e1] focus:bg-surface-container-high dark:focus:bg-[#2a2a2a] focus:outline-none focus:ring-1 focus:ring-primary dark:focus:ring-[#dcc497] ${
+                              COL_WIDTH[c.key] || "min-w-[7rem]"
+                            }`}
+                          />
+                        </td>
+                        {c.key === "result" && (
+                          <td className="px-1.5 py-1">
+                            <SpecBadge check={checks[i]} t={t} />
+                          </td>
+                        )}
+                      </Fragment>
                     ))}
                     {/* Row actions: a reviewer who spots a test item the mapper
                         missed has to be able to add it, and a scan artefact
@@ -658,9 +900,17 @@ const ErpResults = ({ batchId, onNewUpload }) => {
           {detail && (
             <>
               <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                <h3 className="font-headline text-xl text-on-background dark:text-[#e5e2e1] font-semibold truncate">
-                  {detail.filename}
-                </h3>
+                <div className="flex items-center gap-3 min-w-0">
+                  <h3 className="font-headline text-xl text-on-background dark:text-[#e5e2e1] font-semibold truncate">
+                    {detail.filename}
+                  </h3>
+                  {outOfSpec > 0 && (
+                    <span className="shrink-0 whitespace-nowrap flex items-center gap-1 px-2.5 py-1 rounded-full bg-error-container dark:bg-[#93000a]/30 text-error dark:text-[#ffb4ab] text-xs font-label font-bold">
+                      <span className="material-symbols-outlined text-[14px]">warning</span>
+                      {t.erpOutOfSpec(outOfSpec)}
+                    </span>
+                  )}
+                </div>
                 <div className="flex flex-wrap items-center gap-2">
                   {draftRows && (
                     <>
@@ -750,7 +1000,17 @@ const ErpResults = ({ batchId, onNewUpload }) => {
                   on a laptop are two unreadable panes. */}
               {hasSource && splitView ? (
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
-                  <PdfPane jobId={detail.job_id} pageCount={selectedJob?.page_count || 1} t={t} />
+                  <PdfPane
+                    // Both from the list: `detail` still holds the previous
+                    // report while the next one loads, and pairing its id
+                    // with this page count asks for pages it does not have.
+                    jobId={selectedJob.job_id}
+                    pageCount={selectedJob.page_count || 1}
+                    locate={{ ...locate, indexing }}
+                    onStep={stepLocate}
+                    onClear={clearLocate}
+                    t={t}
+                  />
                   {reviewTable}
                 </div>
               ) : (
