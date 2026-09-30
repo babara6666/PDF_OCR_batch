@@ -71,6 +71,10 @@ const ErpProfiles = ({ onClose, onProfileSaved }) => {
   const sampleFileRef = useRef(null);
   const answerFor = useRef(null); // job id the next answer workbook belongs to
   const answerFileRef = useRef(null);
+  // Id of a profile createProfile() just drafted and nobody has saved yet.
+  // The server has no file for it, so loading it would replace the fresh
+  // draft with the default profile's name and aliases.
+  const freshId = useRef(null);
 
   const isBuiltin = selected === "default";
 
@@ -90,8 +94,11 @@ const ErpProfiles = ({ onClose, onProfileSaved }) => {
   useEffect(() => {
     let cancelled = false;
     setNotes("");
-    getErpProfile(selected)
+    const fresh = freshId.current === selected;
+    freshId.current = null;
+    (fresh ? Promise.resolve(null) : getErpProfile(selected))
       .then((d) => {
+        if (!d) return;
         if (cancelled) return;
         setDraft({
           name: d.name || "",
@@ -125,6 +132,7 @@ const ErpProfiles = ({ onClose, onProfileSaved }) => {
       rules: base.rules || [],
     });
     setNewId("");
+    freshId.current = id;
     setSelected(id);
     setProfiles((p) =>
       p.some((x) => x.id === id) ? p : [...p, { id, name: id, column_count: 0, alias_count: 0 }]

@@ -40,11 +40,19 @@ mcp_server/.env
 data/
 static/
 
+# ── Offline delivery packages (docker save output, multi-GB each) ─────────────
+# Nothing COPYs them, but without this every build uploads them as context.
+PrintLens*
+printlens-*
+hotfix-cache/
+
 # ── Sample / test files ───────────────────────────────────────────────────────
 *.pdf
 
 # ── Docs (not needed at runtime) ──────────────────────────────────────────────
 *.md
 !README.md
+# Runtime data, not docs: read by backend/erp/llm.py and served by the API.
+!backend/erp/reference/*.md
 LICENSE
 MODEL_LICENSE

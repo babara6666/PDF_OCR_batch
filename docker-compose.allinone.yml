@@ -73,12 +73,37 @@ services:
       RATE_LIMIT_REQUESTS: "${RATE_LIMIT_REQUESTS:-60}"
       RATE_LIMIT_WINDOW: "${RATE_LIMIT_WINDOW:-60}"
 
+      # ── ERP import mode ────────────────────────────────────────────────
+      # Empty ERP_LLM_PROVIDERS = only 知識通 over MCP maps fields (default).
+      ERP_JOBS_RETENTION_DAYS: "${ERP_JOBS_RETENTION_DAYS:-14}"
+      ERP_LLM_PROVIDERS: "${ERP_LLM_PROVIDERS:-}"
+      ERP_LLM_MODEL: "${ERP_LLM_MODEL:-}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      ERP_OLLAMA_NUM_CTX: "${ERP_OLLAMA_NUM_CTX:-32768}"
+      ERP_LLM_TIMEOUT: "${ERP_LLM_TIMEOUT:-900}"
+      GATEWAY_BASE_URL: "${GATEWAY_BASE_URL:-http://llmgateway.fst:4000/v1}"
+      GATEWAY_API_KEY: "${GATEWAY_API_KEY:-}"
+
+      # ── 打線圖 mode → 圖衍析 (LLMCAD3) ───────────────────────────────
+      # Empty = the tab explains it is not configured instead of failing.
+      LLMCAD_BASE_URL: "${LLMCAD_BASE_URL:-}"
+      LLMCAD_APP_TOKEN: "${LLMCAD_APP_TOKEN:-}"
+      LLMCAD_TIMEOUT_SECONDS: "${LLMCAD_TIMEOUT_SECONDS:-900}"
+
       # Writable config dir for Ultralytics (avoids a startup warning).
       YOLO_CONFIG_DIR: "/tmp/Ultralytics"
       NVIDIA_VISIBLE_DEVICES: "all"
+    # host.docker.internal already resolves on Docker Desktop; this makes it
+    # resolve on Linux too, for Ollama / 圖衍析 running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      # Only ephemeral uploads need a volume; model weights live inside the image.
+      # Model weights live inside the image. Uploads are ephemeral; ERP jobs
+      # and customer profiles are the deployment's own state and must survive
+      # a container rebuild.
       - upload_tmp:/app/backend/uploads
+      - erp_jobs:/app/backend/erp_jobs
+      - erp_profiles:/app/backend/erp/profiles
     deploy:
       resources:
         reservations:
@@ -99,4 +124,8 @@ services:
 
 volumes:
   upload_tmp:
+    driver: local
+  erp_jobs:
+    driver: local
+  erp_profiles:
     driver: local

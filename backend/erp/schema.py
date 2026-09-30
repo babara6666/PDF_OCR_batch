@@ -71,16 +71,18 @@ def load(profile: str = DEFAULT_PROFILE) -> dict:
         path = SCHEMA_PATH
         profile = DEFAULT_PROFILE
 
-    with _lock:
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            if profile != DEFAULT_PROFILE:
-                # Deleted out from under a job that still names it.
-                logger.info("ERP: profile %r is gone, using default", profile)
-                return load(DEFAULT_PROFILE)
-            mtime = 0.0
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        if profile != DEFAULT_PROFILE:
+            # Deleted out from under a job that still names it. Recurse
+            # outside `_lock`: it is not reentrant, so recursing while
+            # holding it would hang this thread (and the event loop) forever.
+            logger.info("ERP: profile %r is gone, using default", profile)
+            return load(DEFAULT_PROFILE)
+        mtime = 0.0
 
+    with _lock:
         cached = _cache.get(profile)
         if cached and cached[0] == mtime:
             return cached[1]

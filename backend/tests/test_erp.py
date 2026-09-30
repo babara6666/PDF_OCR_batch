@@ -619,6 +619,26 @@ def test_a_profile_with_no_required_column_is_refused(client):
     assert "必填" in r.json()["detail"]
 
 
+def test_an_unsaved_profile_id_falls_back_to_default_instead_of_hanging(client):
+    """The fallback used to recurse while holding a non-reentrant lock.
+
+    The UI hits this on every 新增設定檔: it selects the new id before the
+    profile has been saved. Run in a thread so a regression fails the test
+    instead of freezing the whole run.
+    """
+    import threading
+
+    got = []
+    t = threading.Thread(
+        target=lambda: got.append(client.get("/api/erp/profiles/not-saved-yet")),
+        daemon=True,
+    )
+    t.start()
+    t.join(10)
+    assert got, "GET /profiles/<unsaved id> hung"
+    assert got[0].status_code == 200
+
+
 def test_the_default_profile_cannot_be_overwritten_through_the_api(client):
     r = save_profile(client, "default", [{"key": "a", "name": "甲", "required": True}])
     assert r.status_code == 400

@@ -162,14 +162,20 @@ COPY supervisord.conf     /etc/supervisor/conf.d/app.conf
 # Remove default nginx site
 RUN rm -f /etc/nginx/sites-enabled/default
 
-# Writable dirs
+# Writable dirs. erp_jobs and erp/profiles are dockerignored (customer data),
+# so they do not exist in the image; /app/backend is root-owned, so without
+# creating them here the `app` user cannot mkdir them and ERP mode fails on
+# its first upload.
 RUN mkdir -p \
         /app/backend/uploads \
+        /app/backend/erp_jobs \
+        /app/backend/erp/profiles \
         /home/app/.cache/datalab \
         /models/torch \
         /tmp/Ultralytics \
         /var/log/supervisor \
-    && chown -R app:app /app/backend/uploads /home/app /tmp/Ultralytics /models/torch
+    && chown -R app:app /app/backend/uploads /app/backend/erp_jobs \
+        /app/backend/erp/profiles /home/app /tmp/Ultralytics /models/torch
 
 # Surya computes RECOGNITION_RENDER_FONTS from its package path at import
 # time and ignores FONT_DIR. Without this link it tries to download GoNoto

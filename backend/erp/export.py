@@ -22,6 +22,7 @@ import re
 from datetime import datetime
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -66,9 +67,18 @@ def _autosize(ws, headers: list[str], max_width: int = 42) -> None:
         ws.column_dimensions[get_column_letter(i)].width = width
 
 
+def _text(v) -> str:
+    """Cell text with the control characters openpyxl refuses removed.
+
+    PDF text layers and LLM output carry them (\x0c, \x1b, ...), and a
+    single one makes the whole workbook - or the whole batch - fail to save.
+    """
+    return ILLEGAL_CHARACTERS_RE.sub("", str(v or ""))
+
+
 def _append_rows(ws, rows: list[dict], keys: list[str], prefix: list[str] = ()) -> None:
     for row in rows:
-        ws.append([*prefix, *[str(row.get(k, "") or "") for k in keys]])
+        ws.append([_text(v) for v in (*prefix, *[row.get(k, "") for k in keys])])
 
 
 def _timestamp() -> str:
@@ -95,7 +105,7 @@ def job_xlsx(job_id: str) -> tuple[bytes, str]:
     ctx = wb.create_sheet("context")
     ctx.column_dimensions["A"].width = 110
     for line in store.get_markdown(job_id).splitlines():
-        ctx.append([line])
+        ctx.append([_text(line)])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -177,7 +187,7 @@ def batch_xlsx(job_ids: list[str], *, only_reviewed: bool = True) -> tuple[bytes
         ws = wb.create_sheet("未匯入")
         _write_header(ws, ["檔案", "原因"])
         for name, reason in skipped:
-            ws.append([name, reason])
+            ws.append([_text(name), _text(reason)])
         _autosize(ws, ["檔案", "原因"])
 
     buf = io.BytesIO()
