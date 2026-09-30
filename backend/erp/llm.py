@@ -287,7 +287,10 @@ def _parse(content: str, key: str) -> tuple[list, str]:
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
-        raise MappingError("模型沒有回傳 JSON")
+        # Say what came back: "no JSON" alone cannot tell an empty turn from
+        # a refusal from a report cut off by num_ctx.
+        shown = text[:300] + ("…" if len(text) > 300 else "")
+        raise MappingError(f"模型沒有回傳 JSON（回傳內容：{shown or '空白'}）")
     try:
         data = json.loads(text[start : end + 1])
     except json.JSONDecodeError as e:
@@ -318,8 +321,36 @@ async def _run_ollama(model: str, system: str, user: str, fmt: dict | None = Non
     timeout = httpx.Timeout(connect=10.0, read=READ_TIMEOUT, write=60.0, pool=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
-        r.raise_for_status()
-        return (r.json().get("message") or {}).get("content") or ""
+        if r.status_code >= 400:
+            # Ollama puts the real cause (out of memory, unknown model) in the
+            # body; raise_for_status() would drop it for a bare "500".
+            try:
+                detail = r.json().get("error") or r.text
+            except ValueError:
+                detail = r.text
+            raise MappingError(f"Ollama 回 {r.status_code}：{detail[:300]}")
+        data = r.json()
+
+    used = data.get("prompt_eval_count") or 0
+    if used >= OLLAMA_NUM_CTX * 0.95:
+        # Ollama truncates an over-long prompt from the front without saying
+        # so, which drops the instructions and leaves the model rambling.
+        logger.warning(
+            "ERP: prompt used %d of num_ctx %d tokens — report likely truncated; "
+            "raise ERP_OLLAMA_NUM_CTX", used, OLLAMA_NUM_CTX,
+        )
+    message = data.get("message") or {}
+    content = message.get("content") or ""
+    if not content.strip():
+        # Some Qwen3 builds (qwen3-vl among them) ignore `think: false` and
+        # put the whole answer in `thinking`, leaving content empty.
+        content = message.get("thinking") or ""
+    if not content.strip():
+        raise MappingError(
+            f"模型回傳空白（done_reason={data.get('done_reason')}，"
+            f"prompt {used}/{OLLAMA_NUM_CTX} tokens）"
+        )
+    return content
 
 
 async def _run_gateway(model: str, system: str, user: str, fmt: dict | None = None) -> str:
