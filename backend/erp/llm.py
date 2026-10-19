@@ -54,10 +54,11 @@ logger = logging.getLogger("printlens.erp.llm")
 
 REFERENCE_DIR = Path(__file__).parent / "reference"
 
-# Which engines to try, in order. Empty (the default) means the whole path is
-# off and 知識通 over MCP is the only mapper, i.e. exactly today's behaviour.
+# Which engines to try, in order. Unset means Ollama — the backend maps reports
+# itself. Set it to an empty string to turn the path off and leave 知識通 over
+# MCP as the only mapper.
 PROVIDER_ORDER = [
-    p.strip() for p in os.getenv("ERP_LLM_PROVIDERS", "").split(",") if p.strip()
+    p.strip() for p in os.getenv("ERP_LLM_PROVIDERS", "ollama").split(",") if p.strip()
 ]
 # Pins one model across every provider. Normally left unset — each provider's
 # own default is used, and the UI picks per request.
@@ -162,11 +163,16 @@ def available() -> dict:
     for provider in PROVIDER_MODELS:
         catalog = _discover(provider)
         models = catalog["models"]
+        if FORCED_MODEL:
+            models = [FORCED_MODEL] + [m for m in models if m != FORCED_MODEL]
         out["providers"][provider] = {
             "models": models,
-            # Keep the curated default even when the server also serves newer
-            # models, so nobody's default changes under them.
-            "default_model": next(
+            # ERP_LLM_MODEL wins, otherwise keep the curated default even when
+            # the server also serves newer models, so nobody's default changes
+            # under them. Without the first, the picker would send the curated
+            # model and override ERP_LLM_MODEL on every request.
+            "default_model": FORCED_MODEL
+            or next(
                 (m for m in PROVIDER_MODELS[provider] if m in models),
                 models[0] if models else "",
             ),
@@ -191,28 +197,47 @@ def reference(name: str) -> str:
 # The same instructions the 知識通 skill carries, condensed. They are here
 # rather than in a prompt file because they are the contract this module has
 # with schema.normalise_rows(), which is what actually accepts the output.
-SYSTEM_PROMPT = """\
+#
+# Only what holds for every customer lives here. Anything that names a column
+# (which one carries the lot number, how to split a range into max/min) is a
+# property of the profile and travels in its `rules`, rendered into the user
+# prompt by schema.as_markdown — otherwise a customer whose template is not the
+# built-in seven would be told two different output shapes at once.
+_SYSTEM_RULES = """\
 你是進料檢驗報告（COA）的判讀員。使用者給你一份報告的 Markdown 原文，
 你要判斷原表的哪一欄對應到哪一個 ERP 欄位，然後輸出 ERP 匯入用的列。
 
 這是**閱讀理解**任務。不要寫程式、regex 或解析腳本，直接讀懂內容作答。
 
 核心原則：
+- ERP 欄位以使用者給的「ERP 匯入欄位定義」為準，鍵名照抄裡面的 key，不要自己加欄位。
 - 別名清單是提示不是規則。欄名沒出現在清單裡是常態，照語意判斷即可。
 - 一列 = 一個檢驗項目。報告上半部的表頭（產品名、日期、檢驗人員、單號）不是檢驗列。
-- 批號從表頭取出放進第一列的 supplier_lot，其餘列留空；報告本身逐列列出不同批號時才逐列填。
 - 規格欄空白但結果欄有值 → 這一列照樣要輸出。
 - 值一律照抄：不換算單位、不把「~」改成「-」、不補零、不翻譯。
-- 分不出上下限就整串放 spec，寧可留空 spec_max / spec_min 也不要猜。
+- 拿不準某個值該放哪一欄就留空，寫進 notes，不要猜。
 - 掃描件的 OCR 雜訊（不成字的內容）不要當成檢驗項目輸出。
+- 欄位定義最後的「規則」是這個客戶特有的做法，照著做。
 - 認不出來就說認不出來，寫進 notes。**絕對不要編造檢驗數據**——
   這些是進料允收的依據，錯一個數字就是放行了不該放行的料。
-
-只輸出 JSON，形狀為：
-{"rows": [{"supplier_lot": "", "test_item": "", "unit": "", "spec": "",
-           "spec_max": "", "spec_min": "", "result": ""}], "notes": ""}
-notes 寫下你不確定的地方，給覆核的人看。一列都認不出來時 rows 給空陣列並在 notes 說明原因。
 """
+
+
+def _system_prompt(profile: str) -> str:
+    """The rules above plus the output shape, spelled out in this profile's keys.
+
+    The gateway only has json_object mode, so for it this sentence is the only
+    thing that says which keys to use.
+    """
+    row = ", ".join(f'"{k}": ""' for k in schema.keys(profile))
+    return (
+        _SYSTEM_RULES
+        + "\n只輸出 JSON，形狀為：\n"
+        + '{"rows": [{' + row + '}], "notes": ""}\n'
+        + "notes 寫下你不確定的地方，給覆核的人看。"
+        "一列都認不出來時 rows 給空陣列並在 notes 說明原因。\n"
+    )
+
 
 # Ollama takes a JSON schema in `format`; the gateway only has json_object
 # mode, so the shape is stated in the prompt for both and enforced here for
@@ -418,6 +443,7 @@ async def map_document(
             "這份報告仍可由知識通經 MCP 處理。"
         )
 
+    system = _system_prompt(profile)
     user = _user_prompt(filename, markdown, alt_markdown, profile)
     failures: list[str] = []
 
@@ -433,7 +459,7 @@ async def map_document(
         started = time.time()
         try:
             rows, notes = _parse(
-                await runner(chosen, SYSTEM_PROMPT, user, _response_schema(profile)),
+                await runner(chosen, system, user, _response_schema(profile)),
                 "rows",
             )
         except Exception as e:

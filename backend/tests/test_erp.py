@@ -32,6 +32,9 @@ def client(tmp_path, monkeypatch):
     fresh under the patched environment rather than reused across tests.
     """
     monkeypatch.setenv("ERP_JOBS_DIR", str(tmp_path / "jobs"))
+    # Same reason, and so a test's profile never lands in the repo's own
+    # backend/erp/profiles/ where the next real run would list it.
+    monkeypatch.setenv("ERP_PROFILES_DIR", str(tmp_path / "profiles"))
     for mod in [m for m in sys.modules if m == "erp" or m.startswith("erp.")]:
         del sys.modules[mod]
     import erp
@@ -519,6 +522,23 @@ def test_the_prompt_carries_the_schema_and_the_known_traps(client, fake_llm):
     assert "不要編造" in calls[0]["system"]
 
 
+def test_the_output_shape_follows_the_profile_not_the_built_in_seven(client, fake_llm):
+    """The gateway has no JSON schema, so the system prompt is all it gets."""
+    save_profile(client, "acme", [{"key": "heat_no", "name": "爐號", "required": True}])
+    calls = fake_llm({"rows": [{"heat_no": "H1"}]})
+    r = client.post(
+        "/api/erp/jobs",
+        json={"profile_id": "acme", "documents": [{"filename": "a.pdf", "markdown": "x"}]},
+    )
+    job_id = r.json()["jobs"][0]["job_id"]
+    client.post(f"/api/erp/jobs/{job_id}/map", json={})
+
+    system = calls[0]["system"]
+    assert '"heat_no"' in system
+    assert "supplier_lot" not in system
+    assert "spec_max" not in system
+
+
 def test_a_failed_run_leaves_the_job_for_知識通(client, fake_llm):
     """A model that cannot be reached is not a broken document."""
     fake_llm(RuntimeError("connection refused"))
@@ -806,6 +826,39 @@ def test_a_reviewed_report_can_be_kept_as_a_sample(client):
     # in — so the draft prompt only ever sees one kind of answer table.
     assert store.get_expected_rows(sample_id)[0]["供應商批號"] == "24102102"
     assert client.get("/api/erp/jobs").json()["count"] == 1  # the sample is not a report
+
+
+def test_a_report_read_under_the_default_can_teach_a_new_customers_profile(client):
+    """A customer with no profile: the first reviewed batch becomes its seed."""
+    job_id = stage(client, markdown="# 新供應商")
+    client.put(
+        f"/api/erp/jobs/{job_id}/rows",
+        json={"rows": [{"supplier_lot": "B-7", "test_item": "黏度", "result": "1200"}]},
+    )
+    r = client.post(f"/api/erp/jobs/{job_id}/teach", params={"profile": "newco"})
+    assert r.status_code == 201, r.text
+    assert r.json()["profile_id"] == "newco"
+
+    # Created on the spot from the built-in columns, without 四維's spellings.
+    prof = client.get("/api/erp/profiles/newco").json()
+    assert [c["name"] for c in prof["columns"]][0] == "供應商批號"
+    assert all(not c["aliases"] for c in prof["columns"])
+    assert any(p["id"] == "newco" for p in client.get("/api/erp/profiles").json()["profiles"])
+
+    samples = client.get("/api/erp/profiles/newco/samples").json()["samples"]
+    assert len(samples) == 1
+    from erp import store
+
+    assert store.get_expected_rows(samples[0]["job_id"])[0]["供應商批號"] == "B-7"
+    # The default profile gets nothing — it cannot learn anyway.
+    assert client.get("/api/erp/profiles/default/samples").json()["samples"] == []
+
+
+def test_teaching_into_a_malformed_profile_name_is_refused(client):
+    job_id = stage(client)
+    client.put(f"/api/erp/jobs/{job_id}/rows", json={"rows": [{"test_item": "x", "result": "1"}]})
+    r = client.post(f"/api/erp/jobs/{job_id}/teach", params={"profile": "../evil"})
+    assert r.status_code == 400
 
 
 # ── Safety ───────────────────────────────────────────────────────────────────

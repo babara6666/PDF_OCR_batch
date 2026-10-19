@@ -1,4 +1,5 @@
 import { createContext, useContext, useState } from "react";
+import { ZHISHITONG_ENABLED } from "../config";
 
 // ─── Translations ─────────────────────────────────────────────────────────────
 export const translations = {
@@ -113,7 +114,7 @@ export const translations = {
     erpLearnAliasTable: "Import an alias table (key.xlsx)",
     erpLearnAliasHelp:  "The workbook whose columns are your ERP fields and whose cells are the supplier spellings. Read straight across — no model involved.",
     erpLearnSamples:    "Learn from reports you have already done",
-    erpLearnSamplesHelp:"Upload a few COA PDFs and, for each, the import workbook you filled in for it. The PDF alone says what the supplier called things; the workbook says what you decided those things were.",
+    erpLearnSamplesHelp:"Upload a few COA PDFs and, for each, the import workbook you filled in for it. The PDF alone says what the supplier called things; the workbook says what you decided those things were. No workbooks? Run a batch under the default profile, review it, and use \"Keep as a sample\" to file it here.",
     erpLearnAddSample:  "Add sample reports (PDF)",
     erpLearnAnswer:     "Answer workbook",
     erpLearnNoAnswer:   "No answer yet",
@@ -125,6 +126,9 @@ export const translations = {
     erpKeepAsSample:    "Keep as a sample",
     erpKeptAsSample:    "Kept",
     erpKeepHint:        "Adds this report and the rows you settled on to the profile's learning material.",
+    erpTeachTarget:     "Learn into profile…",
+    erpTeachTargetHint: "Read under the built-in profile, which cannot learn. Name the customer's profile to file this under — a new name creates it.",
+    erpTeachTargetNeeded: "Name the customer profile to learn into first (letters, digits, - and _).",
 
     // Mapping engine (local / company LLM, or 知識通 by hand)
     erpEngine:          "Mapping engine",
@@ -469,7 +473,7 @@ export const translations = {
     erpLearnAliasTable: "匯入別名對照表（key.xlsx）",
     erpLearnAliasHelp:  "就是那張「欄＝ERP 欄位、格子＝各家供應商寫法」的表。直接讀進來，不經過模型——這是抄寫，讓模型改寫只會變差。",
     erpLearnSamples:    "從已經做過的報告學",
-    erpLearnSamplesHelp:"上傳幾份 COA，並且為每一份附上你們當初填好的匯入 xlsx。只有 PDF 的話，它只說得出供應商怎麼寫，說不出你們判斷那是哪一欄——附上答案才補得回那個判斷。",
+    erpLearnSamplesHelp:"上傳幾份 COA，並且為每一份附上你們當初填好的匯入 xlsx。只有 PDF 的話，它只說得出供應商怎麼寫，說不出你們判斷那是哪一欄——附上答案才補得回那個判斷。手上沒有填好的 xlsx？先用預設設定檔跑一批、覆核完按「留作學習樣本」指定到這個設定檔，覆核結果就是答案。",
     erpLearnAddSample:  "加入樣本報告（PDF）",
     erpLearnAnswer:     "對照答案",
     erpLearnNoAnswer:   "還沒有答案",
@@ -481,6 +485,9 @@ export const translations = {
     erpKeepAsSample:    "留作學習樣本",
     erpKeptAsSample:    "已留下",
     erpKeepHint:        "把這份報告與你覆核後定案的列，加進這個設定檔的學習材料。",
+    erpTeachTarget:     "學到哪個設定檔…",
+    erpTeachTargetHint: "這份是用內建（四維）設定檔讀的，內建的不能學。填客戶的設定檔名稱，樣本會存到那裡；新名稱會自動建立。",
+    erpTeachTargetNeeded: "請先填要學到哪個客戶設定檔（英數、- 與 _）。",
 
     // 對應引擎（本機／公司 LLM，或人工貼給知識通）
     erpEngine:          "對應引擎",
@@ -712,6 +719,33 @@ export const translations = {
     opWarnReopen:         "授權警示",
   },
 };
+
+// With 知識通 switched off (config.js) the backend's own model does the
+// mapping, so nothing on the page should send anyone to 知識通.
+if (!ZHISHITONG_ENABLED) {
+  Object.assign(translations.en, {
+    modeErpDesc:     "Map OCR'd inspection reports with the local model, review the rows, export for ERP",
+    erpUploadDesc:   "Turn supplier inspection reports (COA) into ERP import rows. Files are OCR'd here, then the local model reads the markdown and maps each supplier's column names onto the standard ERP fields.",
+    btnErpStage:     "OCR & Stage",
+    erpStaging:      "Staging…",
+    erpQueueHeading: "Ready to map",
+    erpQueueDesc:    (n) => `${n} report${n > 1 ? "s are" : " is"} staged. Pick a model and start mapping — this page updates on its own as rows come back.`,
+    erpNotesFrom:    "Model notes",
+    erpEngineCaveat: "A local model can misread supplier column names it has never seen. Check every report against its source before confirming.",
+    erpNoEngine:     "No mapping model is configured. Set ERP_LLM_PROVIDERS=ollama (and OLLAMA_BASE_URL) in .env, then restart the container.",
+  });
+  Object.assign(translations.zh, {
+    modeErpDesc:     "辨識好的檢驗報告由本機模型對應欄位，覆核後匯出給 ERP",
+    erpUploadDesc:   "把供應商的進料檢驗報告（COA）轉成 ERP 匯入用的列。檔案在這裡完成辨識，接著由本機模型讀 Markdown，把各家不同的欄位名稱對應到標準 ERP 欄位。",
+    btnErpStage:     "辨識並暫存",
+    erpStaging:      "正在暫存…",
+    erpQueueHeading: "待對應",
+    erpQueueDesc:    (n) => `已暫存 ${n} 份報告。選好模型按「對應」，這個頁面會自己更新。`,
+    erpNotesFrom:    "模型備註",
+    erpEngineCaveat: "遇到沒看過的供應商欄名時，本機模型可能判斷錯。每一份都要對照原文檢查過再按確認。",
+    erpNoEngine:     "沒有設定對應用的模型。請在 .env 設 ERP_LLM_PROVIDERS=ollama（以及 OLLAMA_BASE_URL），再重啟容器。",
+  });
+}
 
 // ─── Context ──────────────────────────────────────────────────────────────────
 const LanguageContext = createContext(null);

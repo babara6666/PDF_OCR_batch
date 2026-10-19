@@ -18,4 +18,12 @@ export const ERP_ENABLED = true;
 // diagram). The tab also needs the backend's LLMCAD_BASE_URL; with it unset
 // /api/wirebond/status says `enabled: false` and the UI explains instead of
 // failing on the first click.
-export const WIREBOND_ENABLED = true;
+// Off in the shipped image: hidden from users until it is opened to them.
+export const WIREBOND_ENABLED = false;
+
+// ZHISHITONG_ENABLED: whether 知識通 (over MCP, by pasting an instruction) is
+// offered as an ERP mapping engine. Off: the backend's own model (Ollama by
+// default, see ERP_LLM_PROVIDERS) is the only engine, and the copy-this-
+// instruction card and the 知識通 wording are gone from the page. The MCP
+// server itself is untouched — flip back to true to offer it again.
+export const ZHISHITONG_ENABLED = false;

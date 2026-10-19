@@ -525,10 +525,19 @@ export const draftErpProfile = async (profile, { provider = "", model = "" } = {
   }
 };
 
-/** Keep a report a human just reviewed as a learning sample for its profile. */
-export const teachFromErpJob = async (jobId) => {
+/**
+ * Keep a report a human just reviewed as a learning sample. `profile` files it
+ * under another profile than the one it was read under — how a customer with
+ * no profile yet grows one out of their first reviewed batches. The backend
+ * creates that profile if it does not exist.
+ */
+export const teachFromErpJob = async (jobId, profile = "") => {
   try {
-    return (await api.post(`/api/erp/jobs/${jobId}/teach`)).data;
+    return (
+      await api.post(`/api/erp/jobs/${jobId}/teach`, null, {
+        params: profile ? { profile } : undefined,
+      })
+    ).data;
   } catch (error) {
     throw erpError(error, "Failed to keep this report as a sample");
   }

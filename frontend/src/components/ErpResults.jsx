@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "../i18n/index.jsx";
+import { ZHISHITONG_ENABLED } from "../config";
 import {
   deleteErpJob,
   erpExportUrl,
@@ -9,6 +10,7 @@ import {
   getErpSchema,
   getErpTextIndex,
   listErpJobs,
+  listErpProfiles,
   locateErpValue,
   mapErpBatch,
   mapErpJob,
@@ -303,11 +305,16 @@ const ErpResults = ({ batchId, onNewUpload }) => {
 
   // Mapping engine. "manual" is 知識通 — the one the backend cannot push work
   // into, so it gets the copy-this-instruction card instead of a button.
-  const [llmInfo, setLlmInfo] = useState(null);
+  // undefined until the first answer, so "no engine" is not flashed on load.
+  const [llmInfo, setLlmInfo] = useState(undefined);
   const [engine, setEngine] = useState("manual");
   const [model, setModel] = useState("");
   const [mapping, setMapping] = useState(false);
   const [taught, setTaught] = useState(false);
+  // Where a report read under the built-in profile is filed as a sample (see
+  // keepAsSample). Kept across reports so a whole batch goes to one customer.
+  const [teachTarget, setTeachTarget] = useState("");
+  const [customProfiles, setCustomProfiles] = useState([]);
 
   // What the table last asked the PDF pane to find (see locateCell).
   const [locate, setLocate] = useState(null);
@@ -320,8 +327,8 @@ const ErpResults = ({ batchId, onNewUpload }) => {
   editingRef.current = draftRows !== null;
 
   useEffect(() => {
-    // A deployment with ERP_LLM_PROVIDERS unset gets no picker at all and the
-    // page behaves exactly as it did before — 知識通 over MCP, by hand.
+    // A deployment with ERP_LLM_PROVIDERS set empty gets no picker at all —
+    // 知識通 over MCP, by hand (or, with ZHISHITONG_ENABLED off, a notice).
     getErpLlm()
       .then((d) => {
         setLlmInfo(d);
@@ -338,6 +345,15 @@ const ErpResults = ({ batchId, onNewUpload }) => {
   // job rather than defaulted — a customer whose template is not the built-in
   // seven would otherwise be shown the wrong headers over the right values.
   const profileId = jobs[0]?.profile_id || "default";
+
+  // The built-in profile cannot learn, so its reports are taught into a
+  // customer's own profile instead; offer the ones that already exist.
+  useEffect(() => {
+    if (profileId !== "default") return;
+    listErpProfiles()
+      .then((d) => setCustomProfiles((d.profiles || []).filter((p) => !p.builtin)))
+      .catch(() => setCustomProfiles([]));
+  }, [profileId]);
 
   useEffect(() => {
     getErpSchema(profileId)
@@ -550,10 +566,20 @@ const ErpResults = ({ batchId, onNewUpload }) => {
   // The corrections a reviewer just made are the same evidence a training
   // sample carries — this document, and the answer a person settled on. Today
   // they evaporate when the job is pruned; this keeps them.
+  //
+  // A report read under the built-in profile is the customer-with-no-profile
+  // case: the sample goes to the profile being grown for them (created on the
+  // backend if new), since the built-in one is read-only and cannot learn.
+  const needsTarget = profileId === "default";
   const keepAsSample = async () => {
     if (!selectedId) return;
+    const target = teachTarget.trim();
+    if (needsTarget && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(target)) {
+      setError(t.erpTeachTargetNeeded);
+      return;
+    }
     try {
-      await teachFromErpJob(selectedId);
+      await teachFromErpJob(selectedId, needsTarget ? target : "");
       setTaught(true);
       setTimeout(() => setTaught(false), 2200);
       setError(null);
@@ -743,7 +769,7 @@ const ErpResults = ({ batchId, onNewUpload }) => {
                     {e.name === "ollama" ? t.erpEngineOllama : t.erpEngineGateway}
                   </option>
                 ))}
-                <option value="manual">{t.erpEngineManual}</option>
+                {ZHISHITONG_ENABLED && <option value="manual">{t.erpEngineManual}</option>}
               </select>
 
               {currentEngine && (
@@ -787,7 +813,10 @@ const ErpResults = ({ batchId, onNewUpload }) => {
 
           {/* The handoff to 知識通: the backend cannot push work into it, a
               person has to go and ask. */}
-          {!currentEngine && (
+          {!ZHISHITONG_ENABLED && engines.length === 0 && llmInfo !== undefined && (
+            <p className="text-xs text-tertiary dark:text-[#dcc497]">{t.erpNoEngine}</p>
+          )}
+          {ZHISHITONG_ENABLED && !currentEngine && (
             <>
               <div className="flex items-center justify-between gap-4">
                 <span className="font-label text-xs uppercase tracking-widest text-on-surface-variant dark:text-[#cfc5b7] opacity-70">
@@ -951,6 +980,25 @@ const ErpResults = ({ batchId, onNewUpload }) => {
                       </span>
                       {isReviewed ? t.erpUnconfirm : t.erpConfirm}
                     </button>
+                  )}
+                  {isReviewed && needsTarget && (
+                    <>
+                      <input
+                        value={teachTarget}
+                        onChange={(e) => setTeachTarget(e.target.value)}
+                        list="erp-teach-targets"
+                        placeholder={t.erpTeachTarget}
+                        title={t.erpTeachTargetHint}
+                        className="w-40 px-3 py-1.5 rounded-full border border-outline-variant dark:border-[#4c463c] bg-transparent text-xs text-on-background dark:text-[#e5e2e1] focus:outline-none focus:ring-1 focus:ring-primary dark:focus:ring-[#dcc497]"
+                      />
+                      <datalist id="erp-teach-targets">
+                        {customProfiles.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                      </datalist>
+                    </>
                   )}
                   {isReviewed && (
                     <button

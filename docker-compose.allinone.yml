@@ -74,10 +74,12 @@ services:
       RATE_LIMIT_WINDOW: "${RATE_LIMIT_WINDOW:-60}"
 
       # ── ERP import mode ────────────────────────────────────────────────
-      # Empty ERP_LLM_PROVIDERS = only 知識通 over MCP maps fields (default).
+      # The backend maps fields with the host's Ollama by default. An empty
+      # ERP_LLM_PROVIDERS turns that off and leaves only 知識通 over MCP.
+      # qwen3-vl:latest because the 35B model OOMs on the company host.
       ERP_JOBS_RETENTION_DAYS: "${ERP_JOBS_RETENTION_DAYS:-14}"
-      ERP_LLM_PROVIDERS: "${ERP_LLM_PROVIDERS:-}"
-      ERP_LLM_MODEL: "${ERP_LLM_MODEL:-}"
+      ERP_LLM_PROVIDERS: "${ERP_LLM_PROVIDERS:-ollama}"
+      ERP_LLM_MODEL: "${ERP_LLM_MODEL:-qwen3-vl:latest}"
       OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
       ERP_OLLAMA_NUM_CTX: "${ERP_OLLAMA_NUM_CTX:-32768}"
       ERP_LLM_TIMEOUT: "${ERP_LLM_TIMEOUT:-900}"

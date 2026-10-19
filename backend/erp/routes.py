@@ -291,6 +291,10 @@ async def draft_profile(profile: str, payload: DraftIn):
 
     try:
         base = schema.load(profile).get("columns", [])
+        if profile != schema.DEFAULT_PROFILE and not schema.path_for(profile).exists():
+            # Never saved, so load() fell back to the built-in profile. Its
+            # columns are a fair start; 四維's supplier spellings are not.
+            base = [dict(c, aliases=[]) for c in base]
     except Exception:
         base = []
     try:
@@ -318,13 +322,43 @@ async def draft_profile(profile: str, payload: DraftIn):
     }
 
 
+def _seed_profile(profile: str) -> None:
+    """Create `profile` from the built-in columns, aliases left empty.
+
+    Same starting point the profile editor's "new" button gives: most
+    customers want the same seven things, and 四維's supplier spellings are not
+    theirs. Saved rather than left implicit so the profile shows up in the list
+    the moment it has something to learn from.
+    """
+    base = schema.load(schema.DEFAULT_PROFILE)
+    schema.save(
+        profile,
+        {
+            "name": profile,
+            "columns": [dict(c, aliases=[]) for c in base.get("columns", [])],
+            "rules": base.get("rules", []),
+        },
+    )
+
+
 @router.post("/jobs/{job_id}/teach", status_code=201)
-async def teach_from_review(job_id: str):
+async def teach_from_review(
+    job_id: str,
+    profile: str = Query(
+        "", max_length=64, description="學到哪個設定檔；留空＝這份報告自己的設定檔"
+    ),
+):
     """Turn a report a human just signed off into a learning sample.
 
     The corrections a reviewer makes are the same evidence the samples carry —
     this document, and the answer a person settled on for it — and today they
     evaporate the moment the job is pruned. One button keeps them.
+
+    `profile` is for the customer who arrived with no profile at all: their
+    first batch is read under the built-in one, which cannot learn, so the
+    reviewed answers are filed under the profile being built for them instead
+    — created on the spot if it does not exist yet. A few reviewed batches
+    later, "draft" on that profile has real answers to generalise from.
     """
     try:
         meta = store.get_meta(job_id)
@@ -334,21 +368,32 @@ async def teach_from_review(job_id: str):
     if not rows:
         raise HTTPException(status_code=400, detail="這份報告還沒有任何列可以學")
 
-    profile = meta.get("profile_id") or schema.DEFAULT_PROFILE
-    names = {c["key"]: c["name"] for c in schema.columns(profile)}
+    source = meta.get("profile_id") or schema.DEFAULT_PROFILE
+    target = profile.strip() or source
+    if target != schema.DEFAULT_PROFILE:
+        if not schema.valid_id(target):
+            raise HTTPException(status_code=400, detail=f"不合法的設定檔名稱：{target!r}")
+        if not schema.path_for(target).exists():
+            try:
+                _seed_profile(target)
+            except schema.ProfileError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from None
+    # The rows are keyed by the profile they were *read* under, so that is
+    # whose display names turn them back into an answer table.
+    names = {c["key"]: c["name"] for c in schema.columns(source)}
     sample_id = store.create_job(
         filename=meta.get("filename", ""),
         markdown=store.get_markdown(job_id),
         alt_markdown=store.get_alt_markdown(job_id),
         engine=meta.get("engine", ""),
         alt_engine=meta.get("alt_engine", ""),
-        profile_id=profile,
+        profile_id=target,
         kind=store.KIND_SAMPLE,
         # Stored under the display names, the same shape a customer's workbook
         # arrives in, so the draft prompt sees one kind of answer table.
         expected_rows=[{names.get(k, k): v for k, v in row.items()} for row in rows],
     )
-    logger.info("ERP: %s kept as a sample for profile %s", meta.get("filename"), profile)
+    logger.info("ERP: %s kept as a sample for profile %s", meta.get("filename"), target)
     return {"success": True, **store.get_meta(sample_id)}
 
 
