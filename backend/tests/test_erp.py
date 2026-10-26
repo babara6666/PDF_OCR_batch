@@ -885,3 +885,77 @@ def test_deleted_job_is_gone(client):
     job_id = stage(client)
     assert client.delete(f"/api/erp/jobs/{job_id}").status_code == 200
     assert client.get(f"/api/erp/jobs/{job_id}").status_code == 404
+
+
+# ── Security: formulas, workbook size, admin-only deletes, audit ─────────────
+FORMULAS = ["=1+1", "+SUM(A1)", "-2+3", "@cmd", " =HYPERLINK(\"x\")"]
+
+
+def test_xlsx_export_never_writes_a_formula(client):
+    from openpyxl import load_workbook
+
+    job_id = stage(client, filename="=evil.pdf", markdown="=1+1\n")
+    rows = [{"test_item": f, "result": "-0.30"} for f in FORMULAS]
+    client.put(f"/api/erp/jobs/{job_id}/rows", json={"rows": rows})
+    review(client, job_id)
+    for url, params in ((f"/api/erp/jobs/{job_id}/export.xlsx", None),
+                        ("/api/erp/export.xlsx", {"job_ids": job_id})):
+        wb = load_workbook(io.BytesIO(client.get(url, params=params).content))
+        for ws in wb.worksheets:
+            for row in ws.iter_rows():
+                for cell in row:
+                    assert cell.data_type != "f", (ws.title, cell.coordinate, cell.value)
+    wb = load_workbook(io.BytesIO(client.get(f"/api/erp/jobs/{job_id}/export.xlsx").content))
+    assert wb["Sheet1"]["B2"].value == "=1+1"  # kept verbatim, as text
+    assert wb["context"]["A1"].value == "=1+1"
+
+
+def test_csv_export_defuses_formulas_but_keeps_numbers(client):
+    import csv
+
+    job_id = stage(client)
+    rows = [{"test_item": f, "result": "-0.30"} for f in FORMULAS]
+    client.put(f"/api/erp/jobs/{job_id}/rows", json={"rows": rows})
+    review(client, job_id)
+    text = client.get("/api/erp/export.csv", params={"job_ids": job_id}).content.decode("utf-8-sig")
+    body = list(csv.reader(io.StringIO(text)))[1:]
+    items = [r[2] for r in body]
+    assert all(v.startswith("'") for v in items), items
+    assert all("-0.30" in r for r in body)  # a negative measurement is not a formula
+
+
+def test_alias_table_refuses_a_workbook_that_expands_too_far(client, monkeypatch):
+    import erp.learn as learn
+
+    monkeypatch.setattr(learn, "MAX_WORKBOOK_UNCOMPRESSED", 1024)
+    book = xlsx([["爐號", "項目"], ["x" * 5000, "y"]])
+    r = client.post(
+        "/api/erp/profiles/acme/alias-table",
+        files={"file": ("key.xlsx", book, "application/vnd.ms-excel")},
+    )
+    assert r.status_code == 400
+    assert "解壓" in r.json()["detail"]
+
+
+def test_profile_delete_needs_the_admin_key(client, monkeypatch):
+    import erp.routes as routes
+
+    save_profile(client, "acme", [{"key": "lot", "name": "爐號", "aliases": []}])
+    monkeypatch.setattr(routes, "ADMIN_API_KEY", "")
+    assert client.delete("/api/erp/profiles/acme").json()["detail"]["code"] == "admin_disabled"
+    monkeypatch.setattr(routes, "ADMIN_API_KEY", "s3cret")
+    r = client.delete("/api/erp/profiles/acme", headers={"X-Admin-Key": "nope"})
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_required"
+    assert client.delete("/api/erp/profiles/acme", headers={"X-Admin-Key": "s3cret"}).status_code == 200
+
+
+def test_edits_and_signoffs_are_audited(client):
+    import erp.store as store
+
+    job_id = stage(client)
+    client.put(f"/api/erp/jobs/{job_id}/rows", json={"rows": [{"test_item": "a", "result": "1"}]})
+    review(client, job_id)
+    client.delete(f"/api/erp/jobs/{job_id}")
+    lines = (store.JOBS_DIR / "audit.log").read_text(encoding="utf-8").splitlines()
+    actions = [json.loads(line)["action"] for line in lines]
+    assert actions == ["rows.put", "review.set", "job.delete"]

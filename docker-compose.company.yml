@@ -33,6 +33,10 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "8001"
+      # ERP mode's LLM: the shared ollama-hub (../ollama-hub) on the ai-hub
+      # network. This image carries no Ollama and no model.
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama-hub:11434}"
+      ERP_LLM_MODEL: "${ERP_LLM_MODEL:-qwen3-vl:8b}"
       CORS_ORIGINS: "http://localhost,http://localhost:80,http://127.0.0.1"
       # Models are baked in → stay fully offline, never reach the network.
       HF_HUB_OFFLINE: "1"
@@ -54,6 +58,9 @@ services:
               capabilities: [gpu]
     networks:
       - app-net
+      # Shared with ollama-hub — created by ollama-hub/start.* (or once by
+      # hand: `docker network create ai-hub`).
+      - ai-hub
     healthcheck:
       test:
         - CMD
@@ -75,7 +82,7 @@ services:
     container_name: printlens-frontend
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-8080}:80"
+      - "8080:80"   # 固定：規格析 = 8080（fstgbdbplsi.fs-technology.com 反代到這裡），不要改
     depends_on:
       backend:
         condition: service_healthy
@@ -89,3 +96,6 @@ volumes:
 networks:
   app-net:
     driver: bridge
+  ai-hub:
+    name: ai-hub
+    external: true

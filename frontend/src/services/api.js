@@ -29,6 +29,56 @@ const api = axios.create({
   },
 });
 
+// Admin-only calls (deleting a customer profile) are refused with
+// 403 {detail: {code: "admin_required"}}. Ask for the backend's ADMIN_API_KEY
+// once, keep it for this tab only (sessionStorage), and replay the request.
+// The key is never served to the page; whoever runs the server hands it out.
+const ADMIN_KEY_STORAGE = "printlensAdminKey";
+const readAdminKey = () => {
+  try {
+    return window.sessionStorage.getItem(ADMIN_KEY_STORAGE) || "";
+  } catch {
+    return "";
+  }
+};
+api.interceptors.request.use((config) => {
+  const key = readAdminKey();
+  if (key) config.headers["X-Admin-Key"] = key;
+  return config;
+});
+api.interceptors.response.use(undefined, async (error) => {
+  const { response, config } = error;
+  const detail = response?.data?.detail;
+  if (response?.status !== 403 || detail?.code !== "admin_required" || !config) {
+    if (detail && typeof detail === "object" && detail.message) {
+      response.data.detail = detail.message; // callers expect a string
+    }
+    throw error;
+  }
+  const tries = (config.__adminTries || 0) + 1;
+  if (tries > 2) {
+    response.data.detail = detail.message;
+    throw error;
+  }
+  const key = window.prompt(
+    tries === 1 ? "這個操作需要管理者金鑰（ADMIN_API_KEY）：" : "管理者金鑰不正確，請重新輸入：",
+  );
+  if (!key) {
+    response.data.detail = detail.message;
+    throw error;
+  }
+  try {
+    window.sessionStorage.setItem(ADMIN_KEY_STORAGE, key.trim());
+  } catch {
+    /* private mode: use it for this request only */
+  }
+  return api.request({
+    ...config,
+    __adminTries: tries,
+    headers: { ...config.headers, "X-Admin-Key": key.trim() },
+  });
+});
+
 /**
  * Upload single PDF/image file and get markdown content
  * @param {File} file - PDF or image file to upload

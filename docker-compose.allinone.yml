@@ -13,6 +13,8 @@
 #   • Docker + NVIDIA Container Toolkit
 #     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
 #   • ./_bundle present (staged model cache) — required for the BUNDLE_MODELS build
+#   • ../ollama-hub started first (shared Ollama + model folder for ERP mode);
+#     the image itself carries no LLM
 #
 # Build (run once on the GPU host):
 #   docker compose -f docker-compose.allinone.yml build
@@ -36,7 +38,7 @@ services:
     container_name: printlens
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-8080}:80"
+      - "8080:80"   # 固定：規格析 = 8080（fstgbdbplsi.fs-technology.com 反代到這裡），不要改
     environment:
       HOST: "0.0.0.0"
       PORT: "8001"
@@ -70,17 +72,26 @@ services:
       # leaves the API open — fine behind a VPN/firewall allowlist, not on a
       # routable company network.
       API_KEY: "${API_KEY:-}"
+      # Admin key for what is hard to undo (deleting a customer profile). The
+      # page asks for it only when such a call is refused; it is never served
+      # to the browser. The release start scripts generate one into .env.
+      # Empty = those operations are off.
+      ADMIN_API_KEY: "${ADMIN_API_KEY:-}"
       RATE_LIMIT_REQUESTS: "${RATE_LIMIT_REQUESTS:-60}"
       RATE_LIMIT_WINDOW: "${RATE_LIMIT_WINDOW:-60}"
 
       # ── ERP import mode ────────────────────────────────────────────────
-      # The backend maps fields with the host's Ollama by default. An empty
+      # The backend maps fields with the shared ollama-hub (../ollama-hub) by
+      # default — this image carries no Ollama and no model. An empty
       # ERP_LLM_PROVIDERS turns that off and leaves only 知識通 over MCP.
-      # qwen3-vl:latest because the 35B model OOMs on the company host.
+      # qwen3-vl:8b because the 35B model OOMs on the company host (same blob
+      # as qwen3-vl:latest; the name matches ollama-hub/models.txt).
       ERP_JOBS_RETENTION_DAYS: "${ERP_JOBS_RETENTION_DAYS:-14}"
       ERP_LLM_PROVIDERS: "${ERP_LLM_PROVIDERS:-ollama}"
-      ERP_LLM_MODEL: "${ERP_LLM_MODEL:-qwen3-vl:latest}"
-      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      ERP_LLM_MODEL: "${ERP_LLM_MODEL:-qwen3-vl:8b}"
+      # ollama-hub on the shared ai-hub network. For an Ollama installed on the
+      # host instead: http://host.docker.internal:11434
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama-hub:11434}"
       ERP_OLLAMA_NUM_CTX: "${ERP_OLLAMA_NUM_CTX:-32768}"
       ERP_LLM_TIMEOUT: "${ERP_LLM_TIMEOUT:-900}"
       GATEWAY_BASE_URL: "${GATEWAY_BASE_URL:-http://llmgateway.fst:4000/v1}"
@@ -96,9 +107,14 @@ services:
       YOLO_CONFIG_DIR: "/tmp/Ultralytics"
       NVIDIA_VISIBLE_DEVICES: "all"
     # host.docker.internal already resolves on Docker Desktop; this makes it
-    # resolve on Linux too, for Ollama / 圖衍析 running on the host.
+    # resolve on Linux too, for 圖衍析 (or a host-installed Ollama).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      # Shared with ollama-hub — created by ollama-hub/start.* (or once by hand:
+      # `docker network create ai-hub`).
+      - ai-hub
     volumes:
       # Model weights live inside the image. Uploads are ephemeral; ERP jobs
       # and customer profiles are the deployment's own state and must survive
@@ -106,6 +122,10 @@ services:
       - upload_tmp:/app/backend/uploads
       - erp_jobs:/app/backend/erp_jobs
       - erp_profiles:/app/backend/erp/profiles
+    # Hard caps — the GPU reservation below is not a RAM limit. A runaway
+    # batch should hit these, not take the other systems on this host down.
+    mem_limit: "${PRINTLENS_MEMORY:-24g}"
+    pids_limit: 2048
     deploy:
       resources:
         reservations:
@@ -131,3 +151,8 @@ volumes:
     driver: local
   erp_profiles:
     driver: local
+
+networks:
+  ai-hub:
+    name: ai-hub
+    external: true

@@ -22,9 +22,14 @@ The flow this serves:
 """
 from __future__ import annotations
 
+import hmac
+import json
 import logging
+import os
+import threading
+import time
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
@@ -41,6 +46,58 @@ router = APIRouter(prefix="/api/erp", tags=["erp"])
 MAX_MARKDOWN_CHARS = 2_000_000
 MAX_DOCS_PER_REQUEST = 200
 MAX_ROWS_PER_JOB = 5_000
+
+
+# ── Admin gate & audit trail ─────────────────────────────────────────────────
+# The UI has no login: anyone who can open it can stage, edit and sign off rows.
+# What would be hard to undo — deleting a customer profile, which holds the
+# learned column set and aliases — needs ADMIN_API_KEY in an `X-Admin-Key`
+# header. The browser asks for it only when such a call is refused; it is never
+# served to the page. Unset = that operation is off.
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+
+
+def require_admin(request: Request) -> None:
+    if not ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "admin_disabled", "message": "此伺服器未設定管理者金鑰（ADMIN_API_KEY），這個操作已關閉"},
+        )
+    if not hmac.compare_digest(request.headers.get("X-Admin-Key", ""), ADMIN_API_KEY):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "admin_required", "message": "這個操作需要管理者金鑰"},
+        )
+
+
+# Who changed what, appended as JSON lines next to the jobs (store skips files
+# that are not job directories). Rows and sign-offs decide what reaches ERP, so
+# an edit or a review must be traceable to a time and a client address even
+# without accounts. Rotated at AUDIT_MAX_BYTES, one previous file kept.
+AUDIT_MAX_BYTES = 10 * 1024 * 1024
+_audit_lock = threading.Lock()
+
+
+def _audit(request: Request, action: str, **fields) -> None:
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "action": action,
+        "client": forwarded or request.headers.get("X-Real-IP") or (request.client.host if request.client else ""),
+        "user_agent": request.headers.get("User-Agent", "")[:200],
+        **fields,
+    }
+    path = store.JOBS_DIR / "audit.log"
+    try:
+        with _audit_lock:
+            store.JOBS_DIR.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > AUDIT_MAX_BYTES:
+                os.replace(path, path.with_suffix(".log.1"))
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        logger.exception("ERP: could not write the audit log")
+    logger.info("ERP audit: %s", json.dumps(entry, ensure_ascii=False))
 
 
 # ── Payloads ─────────────────────────────────────────────────────────────────
@@ -137,7 +194,7 @@ async def get_profile(profile: str):
 
 
 @router.put("/profiles/{profile}")
-async def put_profile(profile: str, payload: ProfileIn):
+async def put_profile(profile: str, payload: ProfileIn, request: Request):
     """Store a profile a human has looked at.
 
     Every path that produces one — importing an alias table, drafting from
@@ -145,18 +202,32 @@ async def put_profile(profile: str, payload: ProfileIn):
     validation as a hand-written one.
     """
     try:
-        return {"success": True, **schema.save(profile, payload.model_dump())}
+        saved = schema.save(profile, payload.model_dump())
     except schema.ProfileError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
+    _audit(request, "profile.save", profile=profile, columns=len(payload.columns))
+    return {"success": True, **saved}
 
 
-@router.delete("/profiles/{profile}")
-async def delete_profile(profile: str):
+@router.delete("/profiles/{profile}", dependencies=[Depends(require_admin)])
+async def delete_profile(profile: str, request: Request):
     try:
         schema.delete(profile)
     except schema.ProfileError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
+    _audit(request, "profile.delete", profile=profile)
     return {"success": True}
+
+
+async def _read_workbook_upload(file: UploadFile) -> bytes:
+    """Read an uploaded workbook, refusing it once it passes the size cap."""
+    data = await file.read(learn.MAX_WORKBOOK_BYTES + 1)
+    if len(data) > learn.MAX_WORKBOOK_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Excel 檔超過 {learn.MAX_WORKBOOK_BYTES // (1024 * 1024)} MB 上限",
+        )
+    return data
 
 
 @router.post("/profiles/{profile}/alias-table")
@@ -174,7 +245,7 @@ async def import_alias_table(
     Returns a draft rather than saving: `required` cannot be inferred from the
     sheet, and somebody has to say which columns make a row real.
     """
-    data = await file.read()
+    data = await _read_workbook_upload(file)
     try:
         headers, rows = learn.read_sheet(data, sheet)
         columns = learn.columns_from_alias_table(headers, rows)
@@ -252,7 +323,7 @@ async def put_expected(
     except store.JobNotFound:
         raise HTTPException(status_code=404, detail="Job not found") from None
 
-    data = await file.read()
+    data = await _read_workbook_upload(file)
     try:
         headers, rows = learn.read_sheet(data, sheet)
     except learn.SheetError as e:
@@ -485,7 +556,7 @@ async def get_job_markdown(
 
 
 @router.put("/jobs/{job_id}/rows")
-async def put_rows(job_id: str, payload: RowsIn):
+async def put_rows(job_id: str, payload: RowsIn, request: Request):
     """Record the mapped rows. Idempotent — call again to correct them.
 
     This is the endpoint 知識通 writes to, and the one the review table writes
@@ -507,6 +578,8 @@ async def put_rows(job_id: str, payload: RowsIn):
     meta = store.set_rows(
         job_id, rows, mapped_by=payload.mapped_by, notes=payload.notes
     )
+    _audit(request, "rows.put", job_id=job_id, filename=meta.get("filename"),
+           rows=len(rows), mapped_by=payload.mapped_by)
     logger.info(
         "ERP: %s mapped %d row(s) for %s%s",
         payload.mapped_by,
@@ -643,23 +716,26 @@ async def locate_value(
 
 # ── Review sign-off ──────────────────────────────────────────────────────────
 @router.post("/jobs/{job_id}/review")
-async def mark_reviewed(job_id: str, reviewed_by: str = Query("人工覆核", max_length=80)):
+async def mark_reviewed(
+    job_id: str, request: Request, reviewed_by: str = Query("人工覆核", max_length=80)
+):
     """Record that a human checked this job's rows against the source."""
     try:
         meta = store.set_reviewed(job_id, True, reviewed_by=reviewed_by)
     except store.JobNotFound:
         raise HTTPException(status_code=404, detail="Job not found") from None
-    logger.info("ERP: %s reviewed %s", reviewed_by, meta.get("filename"))
+    _audit(request, "review.set", job_id=job_id, filename=meta.get("filename"), reviewed_by=reviewed_by)
     return {"success": True, **meta}
 
 
 @router.delete("/jobs/{job_id}/review")
-async def clear_reviewed(job_id: str):
+async def clear_reviewed(job_id: str, request: Request):
     """Take the sign-off back — the rows changed, or it was ticked in error."""
     try:
         meta = store.set_reviewed(job_id, False)
     except store.JobNotFound:
         raise HTTPException(status_code=404, detail="Job not found") from None
+    _audit(request, "review.clear", job_id=job_id, filename=meta.get("filename"))
     return {"success": True, **meta}
 
 
@@ -770,12 +846,14 @@ async def map_batch(payload: MapBatchIn, background: BackgroundTasks):
 
 
 @router.delete("/jobs/{job_id}")
-async def delete_job(job_id: str):
+async def delete_job(job_id: str, request: Request):
     try:
-        store.get_meta(job_id)
+        meta = store.get_meta(job_id)
     except store.JobNotFound:
         raise HTTPException(status_code=404, detail="Job not found") from None
     store.delete_job(job_id)
+    _audit(request, "job.delete", job_id=job_id, filename=meta.get("filename"),
+           reviewed=bool(meta.get("reviewed_at")))
     return {"success": True}
 
 

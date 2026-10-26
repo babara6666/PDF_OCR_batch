@@ -13,6 +13,13 @@ Everything is written as text. Lot numbers like `24102102` and results like
 `0.30` are identifiers and measurements, not quantities: letting Excel coerce
 them to floats drops the leading zero, rewrites `1130220M0057` in scientific
 notation, and produces an ERP row nobody can trace back to the PDF.
+
+Text also means never a formula. The values come from OCR, an LLM, or a person
+editing rows, so a cell reading `=HYPERLINK(...)` must open as that text, not
+run. openpyxl turns any string starting with `=` into a formula; `_append`
+writes such cells back as strings. CSV has no cell types, so `_csv_safe`
+prefixes a `'` on values a spreadsheet would read as a formula — but leaves
+plain numbers like `-0.30` alone, since those are measurements.
 """
 from __future__ import annotations
 
@@ -47,8 +54,16 @@ def _safe_sheet_name(name: str, used: set[str]) -> str:
     return candidate
 
 
+def _append(ws, values) -> None:
+    """ws.append, but every `=...` string stays a string (see module docstring)."""
+    ws.append(list(values))
+    for cell in ws[ws.max_row]:
+        if cell.data_type == "f":
+            cell.data_type = "s"
+
+
 def _write_header(ws, headers: list[str]) -> None:
-    ws.append(headers)
+    _append(ws, [_text(h) for h in headers])
     for i, _ in enumerate(headers, 1):
         cell = ws.cell(row=1, column=i)
         cell.font = _HEADER_FONT
@@ -78,7 +93,20 @@ def _text(v) -> str:
 
 def _append_rows(ws, rows: list[dict], keys: list[str], prefix: list[str] = ()) -> None:
     for row in rows:
-        ws.append([_text(v) for v in (*prefix, *[row.get(k, "") for k in keys])])
+        _append(ws, [_text(v) for v in (*prefix, *[row.get(k, "") for k in keys])])
+
+
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+_PLAIN_NUMBER = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?%?$")
+
+
+def _csv_safe(v) -> str:
+    """A CSV value a spreadsheet will not evaluate as a formula (CWE-1236)."""
+    s = str(v or "")
+    lead = s.lstrip(" ")
+    if lead.startswith(_FORMULA_START) and not _PLAIN_NUMBER.match(lead.strip()):
+        return "'" + s
+    return s
 
 
 def _timestamp() -> str:
@@ -105,7 +133,7 @@ def job_xlsx(job_id: str) -> tuple[bytes, str]:
     ctx = wb.create_sheet("context")
     ctx.column_dimensions["A"].width = 110
     for line in store.get_markdown(job_id).splitlines():
-        ctx.append([_text(line)])
+        _append(ctx, [_text(line)])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -187,7 +215,7 @@ def batch_xlsx(job_ids: list[str], *, only_reviewed: bool = True) -> tuple[bytes
         ws = wb.create_sheet("未匯入")
         _write_header(ws, ["檔案", "原因"])
         for name, reason in skipped:
-            ws.append([_text(name), _text(reason)])
+            _append(ws, [_text(name), _text(reason)])
         _autosize(ws, ["檔案", "原因"])
 
     buf = io.BytesIO()
@@ -210,7 +238,7 @@ def batch_csv(job_ids: list[str], *, only_reviewed: bool = True) -> tuple[bytes,
     keys = schema.keys(profile)
     buf = io.StringIO(newline="")
     w = csv.writer(buf)
-    w.writerow(["來源檔案", *schema.headers(profile)])
+    w.writerow([_csv_safe(h) for h in ["來源檔案", *schema.headers(profile)]])
     for job_id in job_ids:
         try:
             meta = store.get_meta(job_id)
@@ -224,5 +252,5 @@ def batch_csv(job_ids: list[str], *, only_reviewed: bool = True) -> tuple[bytes,
             continue
         name = meta.get("filename") or job_id
         for row in store.get_rows(job_id):
-            w.writerow([name, *[str(row.get(k, "") or "") for k in keys]])
+            w.writerow([_csv_safe(name), *[_csv_safe(row.get(k, "")) for k in keys]])
     return buf.getvalue().encode("utf-8-sig"), f"ERP匯入_{_timestamp()}.csv"

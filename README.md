@@ -290,10 +290,14 @@ PDF_OCR_FS/
 
 ```bash
 ERP_LLM_PROVIDERS=ollama,gateway     # 依序嘗試，本機優先
-OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_BASE_URL=http://localhost:11434   # 本機開發；Docker 部署預設 http://ollama-hub:11434
 GATEWAY_BASE_URL=http://llmgateway.fst:4000/v1
 GATEWAY_API_KEY=...                  # gateway 才需要
 ```
+
+Docker 部署時，本機模型由四個專案共用的 **ollama-hub**（`../ollama-hub`）提供：映像檔
+不含 Ollama、不含模型，compose 已加入 `ai-hub` 網路並預設連 `http://ollama-hub:11434`。
+請先依 `ollama-hub/README.md` 啟動它並放入 `qwen3-vl:8b`，再啟動本專案。
 
 設了以後覆核頁上方會多一個「對應引擎」選單（本機模型／公司 gateway／知識通），
 選好按「開始對應」就直接跑，不必到知識通貼指令。模型清單是跟伺服器要的

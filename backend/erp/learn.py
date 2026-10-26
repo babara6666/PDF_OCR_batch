@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
+import zipfile
 from typing import Any
 
 logger = logging.getLogger("printlens.erp.learn")
@@ -35,6 +37,15 @@ logger = logging.getLogger("printlens.erp.learn")
 # COA or alias table and far below anything that would hurt.
 MAX_ROWS = 5_000
 MAX_COLUMNS = 60
+# A workbook is XML in a ZIP: a small upload can expand to gigabytes of XML
+# (sharedStrings, or a sheet of blank rows that MAX_ROWS never counts). Checked
+# from the ZIP directory before openpyxl parses anything, like main.py's
+# reject_if_zip_bomb does for the OCR path.
+MAX_WORKBOOK_BYTES = int(float(os.getenv("ERP_XLSX_MAX_MB", "20")) * 1024 * 1024)
+MAX_WORKBOOK_UNCOMPRESSED = int(float(os.getenv("ERP_XLSX_MAX_UNCOMPRESSED_MB", "100")) * 1024 * 1024)
+MAX_WORKBOOK_ENTRIES = 2_000
+# Rows looked at (blank ones included) before giving up on a sheet.
+MAX_SCANNED_ROWS = 200_000
 
 
 class SheetError(ValueError):
@@ -50,6 +61,23 @@ def _cell(value: Any) -> str:
     return str(value).strip()
 
 
+def check_workbook(data: bytes) -> None:
+    """Refuse a workbook that would expand past the limits, before parsing it."""
+    if len(data) > MAX_WORKBOOK_BYTES:
+        raise SheetError(f"Excel 檔超過 {MAX_WORKBOOK_BYTES // (1024 * 1024)} MB 上限")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            infos = zf.infolist()
+    except zipfile.BadZipFile as e:
+        raise SheetError("這不是 .xlsx 檔（讀不出 ZIP 結構）") from e
+    if len(infos) > MAX_WORKBOOK_ENTRIES:
+        raise SheetError("Excel 檔內部檔案數過多，拒絕解析")
+    if sum(i.file_size for i in infos) > MAX_WORKBOOK_UNCOMPRESSED:
+        raise SheetError(
+            f"Excel 檔解壓後超過 {MAX_WORKBOOK_UNCOMPRESSED // (1024 * 1024)} MB 上限，拒絕解析"
+        )
+
+
 def read_sheet(data: bytes, sheet: str = "") -> tuple[list[str], list[list[str]]]:
     """`(headers, rows)` from a workbook, as text.
 
@@ -59,6 +87,7 @@ def read_sheet(data: bytes, sheet: str = "") -> tuple[list[str], list[list[str]]
     """
     from openpyxl import load_workbook
 
+    check_workbook(data)
     try:
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as e:
@@ -68,7 +97,9 @@ def read_sheet(data: bytes, sheet: str = "") -> tuple[list[str], list[list[str]]
         ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.worksheets[0]
         headers: list[str] = []
         rows: list[list[str]] = []
-        for raw in ws.iter_rows(values_only=True):
+        for scanned, raw in enumerate(ws.iter_rows(values_only=True, max_col=MAX_COLUMNS)):
+            if scanned >= MAX_SCANNED_ROWS:
+                break
             cells = [_cell(v) for v in (raw or ())][:MAX_COLUMNS]
             if not headers:
                 if sum(1 for c in cells if c) > 1:
@@ -89,6 +120,7 @@ def read_sheet(data: bytes, sheet: str = "") -> tuple[list[str], list[list[str]]
 def sheet_names(data: bytes) -> list[str]:
     from openpyxl import load_workbook
 
+    check_workbook(data)
     try:
         wb = load_workbook(io.BytesIO(data), read_only=True)
     except Exception as e:
