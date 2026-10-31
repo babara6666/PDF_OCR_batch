@@ -427,6 +427,24 @@ WIREBOND_LIVE=1 LLMCAD_BASE_URL=http://127.0.0.1:8000   WIREBOND_OCR_DIR=<含 oc
 
 ---
 
+## 推薦模型（要最佳結果時）
+
+OCR 本身（Marker / fastdoc）不用 LLM。會用到 LLM 的只有 **ERP 匯入的欄位對應**
+和**打線圖的 netlist 理解**。
+
+| 用途 | 最佳結果 | 預設／機器較小時 | 說明 |
+|---|---|---|---|
+| ERP 欄位對應（本機） | `qwen3.6:35b-a3b` | `qwen3-vl:8b`（compose 預設） | 35B-A3B 是 MoE，每次只激活約 3B，讀報告的速度可以接受。公司主機上它會 OOM，所以 compose 預設 8b。記憶體夠的機器設 `ERP_LLM_MODEL=qwen3.6:35b-a3b` |
+| ERP 欄位對應（公司 gateway） | `anthropic/claude-opus-5-5`（gateway 上沒有就用 `anthropic/claude-opus-5`） | `anthropic/claude-sonnet-5-5` | 遇到沒看過的供應商欄名時，本機 8B–35B 明顯比雲端大模型差。要正確率就走 gateway（`ERP_LLM_PROVIDERS=gateway,ollama`） |
+| 打線圖 netlist 理解 | `qwen3.6:35b-a3b` | — | 模型在圖衍析那邊選，316D netlist 已用這顆實測可逐 pad 還原（約 3 分鐘一輪），見圖衍析 README |
+
+- 新版 Claude（Opus 5 之後）不接受 `temperature`，但 gateway 這條路徑會送 `temperature: 0`。
+  走 gateway 回 HTTP 400 的話，請 gateway（LiteLLM）管理者開啟 `drop_params`。
+  雲端模型在本專案**尚未用 `測試紀錄251117.xlsx` 實測正確率**，上線前請先跑一輪對照。
+- 本機模型都放在共用的 ollama-hub，名稱要跟 `ollama-hub/models.txt` 一致。
+
+---
+
 ## 快速路徑 fastdoc（免模型、免 GPU）
 
 `backend/fastdoc/` 是一條放在 Marker 前面的分流器，架構移植自
